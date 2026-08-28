@@ -8,12 +8,27 @@
  * SECURITY — the URL path fetches a user-supplied address from the server,
  * which is a textbook SSRF vector. Left unguarded it would let anyone use this
  * app to probe the private network it runs in, or read a cloud metadata
- * endpoint (169.254.169.254) and exfiltrate credentials. Guards below:
- * scheme allow-list, DNS resolution checked against private ranges BEFORE the
- * request, no redirect following, a hard timeout, and a response size cap.
+ * endpoint (169.254.169.254) and exfiltrate credentials.
+ *
+ * Guards: scheme allow-list, no redirect following, a hard timeout, a response
+ * size cap, and — most importantly — CONNECTION PINNING.
+ *
+ * On DNS rebinding: it is not enough to resolve the hostname, check the IP,
+ * and then hand the hostname to a fetch client. The client performs its OWN
+ * resolution when the request goes out, and an attacker who controls the
+ * domain's DNS can answer the first lookup with a public IP (passing the
+ * check) and the second with 169.254.169.254 (used for the real connection).
+ * The check and the connection must target the same address, so this module
+ * resolves exactly ONCE and then connects to that literal IP over
+ * node:http/https — sending the original hostname in the Host header and as
+ * the TLS SNI name so virtual-hosted HTTPS still works. No name resolution
+ * happens at connect time, which is what closes the window.
  */
 
-import { lookup } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import http from "node:http";
+import https from "node:https";
 import Anthropic from "@anthropic-ai/sdk";
 import { STOPWORDS, normalizeText, tokenize } from "../seo/normalize";
 
@@ -23,6 +38,13 @@ const MAX_BYTES = 512 * 1024;
 export class UnsafeUrlError extends Error {
   readonly status = 400;
 }
+
+/** Injectable so the rebinding scenario can be simulated in tests. */
+export type LookupFn = (
+  hostname: string,
+) => Promise<Array<{ address: string; family: number }>>;
+
+const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true });
 
 /** RFC1918, loopback, link-local (incl. cloud metadata), and IPv6 equivalents. */
 function isPrivateAddress(ip: string, family: number): boolean {
@@ -48,7 +70,42 @@ function isPrivateAddress(ip: string, family: number): boolean {
   return false;
 }
 
-async function assertPublicUrl(raw: string): Promise<URL> {
+/**
+ * The single address the request is allowed to touch. Everything downstream
+ * connects to `address` literally — never to `url.hostname`.
+ */
+export interface PinnedTarget {
+  url: URL;
+  address: string;
+  family: number;
+}
+
+/**
+ * Final gate, called again immediately before the socket is opened.
+ *
+ * Belt and braces: the address is already validated by `resolvePinnedTarget`,
+ * and no second resolution happens in between. Re-checking here means that if
+ * a future refactor ever reintroduces a resolution step, the connection is
+ * still verified rather than silently trusted.
+ */
+export function assertConnectAllowed(address: string, family: number): void {
+  if (isPrivateAddress(address, family)) {
+    throw new UnsafeUrlError("That host is not reachable from here.");
+  }
+}
+
+/**
+ * Parses, validates and resolves the URL EXACTLY ONCE, returning the address
+ * the caller must connect to.
+ *
+ * Resolving here and connecting to the returned literal is what defeats DNS
+ * rebinding: there is no second lookup for an attacker's TTL-0 record to
+ * answer differently.
+ */
+export async function resolvePinnedTarget(
+  raw: string,
+  lookupFn: LookupFn = defaultLookup,
+): Promise<PinnedTarget> {
   let url: URL;
   try {
     url = new URL(raw.includes("://") ? raw : `https://${raw}`);
@@ -65,19 +122,31 @@ async function assertPublicUrl(raw: string): Promise<URL> {
     throw new UnsafeUrlError("That host is not reachable from here.");
   }
 
-  // Resolve first and check the ACTUAL address: a public hostname can resolve
-  // to a private IP, which a string check alone would happily allow.
+  // A bare IP in the URL needs no DNS at all — validate it directly. Without
+  // this branch, http://169.254.169.254/ would depend on the resolver's
+  // behaviour for an IP literal rather than being checked outright.
+  const literal = isIP(host.replace(/^\[|\]$/g, ""));
+  if (literal !== 0) {
+    const address = host.replace(/^\[|\]$/g, "");
+    assertConnectAllowed(address, literal);
+    return { url, address, family: literal };
+  }
+
   let resolved: Array<{ address: string; family: number }>;
   try {
-    resolved = await lookup(host, { all: true });
+    resolved = await lookupFn(host);
   } catch {
     throw new UnsafeUrlError("Could not resolve that domain.");
   }
-  if (resolved.length === 0 || resolved.some((r) => isPrivateAddress(r.address, r.family))) {
-    throw new UnsafeUrlError("That host is not reachable from here.");
+  if (resolved.length === 0) {
+    throw new UnsafeUrlError("Could not resolve that domain.");
   }
 
-  return url;
+  // Reject if ANY answer is private. A rebinding attacker may return a mixed
+  // record set hoping the client picks the private one.
+  for (const r of resolved) assertConnectAllowed(r.address, r.family);
+
+  return { url, address: resolved[0].address, family: resolved[0].family };
 }
 
 export interface SiteContext {
@@ -97,50 +166,100 @@ function decodeEntities(text: string): string {
     .replace(/&#39;/g, "'");
 }
 
+interface RawResponse {
+  status: number;
+  contentType: string;
+  body: string;
+}
+
+/**
+ * Issues the GET against the PINNED IP.
+ *
+ * `host` is the literal address, so the socket layer performs no name
+ * resolution. `servername` supplies TLS SNI and drives certificate validation,
+ * and the explicit Host header keeps virtual-hosted sites working — together
+ * these preserve normal HTTPS behaviour while removing the second DNS lookup
+ * that made rebinding possible.
+ */
+function requestPinned(target: PinnedTarget): Promise<RawResponse> {
+  const { url, address, family } = target;
+  // Re-validate immediately before the socket opens.
+  assertConnectAllowed(address, family);
+
+  const isHttps = url.protocol === "https:";
+  const transport = isHttps ? https : http;
+
+  return new Promise<RawResponse>((resolve, reject) => {
+    const req = transport.request(
+      {
+        host: address,
+        family,
+        port: Number(url.port) || (isHttps ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        // Host header keeps virtual hosting correct; SNI keeps TLS correct.
+        servername: isHttps ? url.hostname : undefined,
+        headers: {
+          Host: url.host,
+          "User-Agent": "KeywordForge/0.1 (+keyword research)",
+          Accept: "text/html",
+        },
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const contentType = String(res.headers["content-type"] ?? "");
+
+        // Never follow redirects — the target could point at a private
+        // address that never went through the guard.
+        if (status >= 300 && status < 400) {
+          res.destroy();
+          reject(new UnsafeUrlError("That URL redirects; enter the final address instead."));
+          return;
+        }
+
+        let received = 0;
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          received += Buffer.byteLength(chunk);
+          body += chunk;
+          // Cap the read rather than trusting content-length.
+          if (received >= MAX_BYTES) res.destroy();
+        });
+        res.on("end", () => resolve({ status, contentType, body }));
+        res.on("close", () => resolve({ status, contentType, body }));
+        res.on("error", () => reject(new UnsafeUrlError("Could not read that page.")));
+      },
+    );
+
+    req.setTimeout(FETCH_TIMEOUT_MS, () => {
+      req.destroy();
+      reject(new UnsafeUrlError("That site took too long to respond."));
+    });
+    req.on("error", () => reject(new UnsafeUrlError("Could not read that page.")));
+    req.end();
+  });
+}
+
 /** Pulls title, meta description and headings. No DOM parser needed for this. */
-export async function fetchSiteContext(rawUrl: string): Promise<SiteContext> {
-  const url = await assertPublicUrl(rawUrl);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+export async function fetchSiteContext(
+  rawUrl: string,
+  lookupFn?: LookupFn,
+): Promise<SiteContext> {
+  const target = await resolvePinnedTarget(rawUrl, lookupFn);
+  const url = target.url;
 
   try {
-    const res = await fetch(url, {
-      // Manual: a redirect could point at a private address that bypassed the
-      // pre-flight DNS check.
-      redirect: "manual",
-      signal: controller.signal,
-      headers: { "User-Agent": "KeywordForge/0.1 (+keyword research)", Accept: "text/html" },
-    });
+    const res = await requestPinned(target);
 
-    if (res.status >= 300 && res.status < 400) {
-      throw new UnsafeUrlError("That URL redirects; enter the final address instead.");
-    }
-    if (!res.ok) {
+    if (res.status < 200 || res.status >= 300) {
       throw new UnsafeUrlError(`The site responded with ${res.status}.`);
     }
-    const type = res.headers.get("content-type") ?? "";
-    if (!type.includes("html")) {
+    if (!res.contentType.includes("html")) {
       throw new UnsafeUrlError("That URL did not return an HTML page.");
     }
 
-    // Cap the read rather than trusting content-length.
-    const reader = res.body?.getReader();
-    let html = "";
-    if (reader) {
-      const decoder = new TextDecoder();
-      let received = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        received += value.byteLength;
-        html += decoder.decode(value, { stream: true });
-        if (received >= MAX_BYTES) {
-          await reader.cancel();
-          break;
-        }
-      }
-    }
-
+    const html = res.body;
     const strip = (s: string) => decodeEntities(s.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
 
     const title = strip(html.match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i)?.[1] ?? "");
@@ -158,12 +277,7 @@ export async function fetchSiteContext(rawUrl: string): Promise<SiteContext> {
     return { url: url.toString(), title, description, headings };
   } catch (error) {
     if (error instanceof UnsafeUrlError) throw error;
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new UnsafeUrlError("That site took too long to respond.");
-    }
     throw new UnsafeUrlError("Could not read that page.");
-  } finally {
-    clearTimeout(timer);
   }
 }
 

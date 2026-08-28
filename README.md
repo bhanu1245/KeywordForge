@@ -62,6 +62,8 @@ Two things worth knowing about this layer:
 
 **Competitor data is bounded, and the UI says so.** Ahrefs answers "what does X rank for" from its own web-scale index. Everything here is derived from the SERPs *this project* has actually collected, so a competitor's keyword set is only ever as complete as the SERP analysis you have run. Within the project's own keyword set it is accurate — it comes from the live SERP, not an estimate — but it is not their full organic footprint.
 
+**The URL fetcher pins its connection (SSRF / DNS rebinding).** Module 17 fetches a user-supplied URL server-side. Checking the hostname's DNS and then handing the *hostname* to a fetch client is not enough: the client resolves again when the request goes out, and an attacker controlling the domain can answer the first lookup with a public IP and the second with `169.254.169.254`. `resolvePinnedTarget()` therefore resolves exactly once and `requestPinned()` connects to that literal IP over `node:http`/`https`, sending the original hostname as the `Host` header and TLS SNI so virtual-hosted HTTPS still validates normally. No name resolution happens at connect time. Covered by `tests/ssrf.test.ts`, including a rebinding resolver that returns public-then-private and an assertion that only one lookup occurs.
+
 **SERP analysis is the expensive one.** One provider call per keyword, so it is always explicit, batched, capped, and run as a background job — never implicit on discovery, which would multiply the cost of every search by the number of ideas returned. The panel states the billable call count before you click.
 
 Carried forward from later phases because retrofitting them is expensive (PRD §7 note):
