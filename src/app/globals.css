@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/*
+ * KeywordForge design tokens.
+ *
+ * TAILWIND V4 NOTE — this bit is load-bearing. Tokens declared in `@theme`
+ * generate real utilities (`bg-surface`, `text-ink`, `border-line`). The v3
+ * shorthand `bg-[--color-surface]` does NOT work in v4: it compiles to
+ * `background-color: --color-surface`, an invalid value the browser silently
+ * drops, so the entire UI renders unstyled. Always use the generated utility,
+ * or `bg-(--token)` for a one-off.
+ *
+ * THEMING — three states, deliberately:
+ *   1. no `data-theme`  -> follow the OS (`prefers-color-scheme`)
+ *   2. data-theme=light -> pinned light, even on a dark OS
+ *   3. data-theme=dark  -> pinned dark, even on a light OS
+ *
+ * `@theme` below holds the LIGHT palette, because Tailwind emits it on bare
+ * `:root` and that is the correct default for an unknown OS. Dark is layered
+ * on top by the two blocks that follow. Those two carry identical values and
+ * MUST be kept in sync — plain CSS has no way to share one declaration block
+ * between a media query and an attribute selector, and duplicating is safer
+ * here than relying on `light-dark()`, which would break colours outright on
+ * an older browser rather than degrading.
+ *
+ * The palette is low-chroma in both themes so the only saturated colour on
+ * screen is data — intent badges and difficulty bands. Every text token is
+ * contrast-checked against its own theme's `surface`, not assumed from the
+ * other one.
+ */
+
+@theme {
+  /* Inter, injected as a CSS variable by next/font in layout.tsx. The
+     fallback stack matters: it is what renders during `display: swap`. */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+
+  /* ---- LIGHT (default) ---- */
+
+  /* Surfaces. `canvas` is a warm off-white, not #fff: a pure-white field is
+     fatiguing for all-day data work and leaves cards nothing to lift from. */
+  --color-canvas: #f6f7fb;
+  --color-surface: #ffffff;
+  --color-elevated: #f1f3f9;
+  --color-line: #e4e8f0;
+  --color-line-strong: #c9d1e0;
+
+  /* Text — contrast-checked against --color-surface (#fff) */
+  --color-ink: #0f172a; /* 17.9:1 */
+  --color-muted: #475569; /* 7.6:1  */
+  --color-subtle: #64748b; /* 4.8:1  */
+
+  /* Brand. `brand` is the solid fill under white text (6.3:1).
+     `brand-soft` is "the readable brand tone against this theme's surface",
+     so it goes DARKER on light and lighter on dark — it is a role, not a
+     fixed colour. Inverting it is the classic dark-mode-first mistake. */
+  --color-brand: #4f46e5;
+  --color-brand-soft: #4338ca; /* 7.9:1 on white */
+  --color-brand-dim: #e0e7ff;
+
+  /* Difficulty bands — 400-level tints are invisible on white, so light mode
+     uses 700-level tones. */
+  --color-easy: #15803d;
+  --color-medium: #a16207;
+  --color-hard: #c2410c;
+  --color-extreme: #b91c1c;
+
+  /* Intent families */
+  --color-transactional: #047857;
+  --color-commercial: #0369a1;
+  --color-informational: #6d28d9;
+  --color-navigational: #475569;
+
+  --color-positive: #15803d;
+  --color-danger: #b91c1c;
+  --color-warning: #a16207;
+
+  /* Ambient header wash. Much weaker on light, where a brand tint reads as a
+     stain rather than depth. */
+  --color-glow: color-mix(in oklab, #4f46e5 10%, transparent);
+
+  /* Modal scrim. Always a DARKENING layer, never `canvas` at low alpha — on
+     light that would tint the page rather than isolate the dialog. */
+  --color-scrim: rgb(15 23 42 / 0.4);
+
+  /* Dense dashboard rhythm: 4px base */
+  --radius-card: 0.75rem;
+  --radius-control: 0.5rem;
+}
+
+/* ---- DARK: following the OS, unless the user pinned light ---- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-canvas: #0a0e17;
+    --color-surface: #121826;
+    --color-elevated: #1a2133;
+    --color-line: #232c42;
+    --color-line-strong: #33405e;
+
+    --color-ink: #e6eaf3; /* 14.7:1 on #121826 */
+    --color-muted: #9aa5bc; /* 7.2:1  */
+    --color-subtle: #8592ad; /* 5.7:1  */
+
+    --color-brand: #4f46e5;
+    --color-brand-soft: #818cf8; /* 5.9:1 on #121826 */
+    --color-brand-dim: #312e81;
+
+    --color-easy: #4ade80;
+    --color-medium: #facc15;
+    --color-hard: #fb923c;
+    --color-extreme: #f87171;
+
+    --color-transactional: #34d399;
+    --color-commercial: #38bdf8;
+    --color-informational: #a78bfa;
+    --color-navigational: #94a3b8;
+
+    --color-positive: #4ade80;
+    --color-danger: #f87171;
+    --color-warning: #fbbf24;
+
+    --color-glow: color-mix(in oklab, #4f46e5 22%, transparent);
+    --color-scrim: rgb(2 6 23 / 0.72);
+  }
+}
+
+/* ---- DARK: pinned by the user. Keep in sync with the block above. ---- */
+:root[data-theme="dark"] {
+  --color-canvas: #0a0e17;
+  --color-surface: #121826;
+  --color-elevated: #1a2133;
+  --color-line: #232c42;
+  --color-line-strong: #33405e;
+
+  --color-ink: #e6eaf3;
+  --color-muted: #9aa5bc;
+  --color-subtle: #8592ad;
+
+  --color-brand: #4f46e5;
+  --color-brand-soft: #818cf8;
+  --color-brand-dim: #312e81;
+
+  --color-easy: #4ade80;
+  --color-medium: #facc15;
+  --color-hard: #fb923c;
+  --color-extreme: #f87171;
+
+  --color-transactional: #34d399;
+  --color-commercial: #38bdf8;
+  --color-informational: #a78bfa;
+  --color-navigational: #94a3b8;
+
+  --color-positive: #4ade80;
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+
+  --color-glow: color-mix(in oklab, #4f46e5 22%, transparent);
+  --color-scrim: rgb(2 6 23 / 0.72);
+}
+
+/*
+ * `color-scheme` drives native UI — scrollbar gutters, form controls, the
+ * canvas the browser paints before our CSS lands. It has to track the theme
+ * or a pinned-light page shows dark native widgets.
+ */
+:root {
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * One visible focus style for everything. Never removed — an invisible
+   * focus ring makes the app unusable by keyboard, and the table header sort
+   * controls are keyboard-operated.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-soft);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-brand-soft) 28%, transparent);
+    color: var(--color-ink);
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+  }
+}
+
+@layer utilities {
+  /* Tabular figures stop metric columns jittering as values change. */
+  .nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* Loading placeholder. Used instead of a blocking spinner for >1s work. */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--color-elevated) 25%,
+      color-mix(in oklab, var(--color-line-strong) 55%, transparent) 37%,
+      var(--color-elevated) 63%
+    );
+    background-size: 400% 100%;
+    animation: kf-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes kf-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/* Scrollbars styled to disappear into the surface rather than frame it. */
+* {
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 999px;
+  border: 2px solid var(--color-canvas);
+}
+
+input[type="range"] {
+  accent-color: var(--color-brand);
+}
+input[type="checkbox"] {
+  accent-color: var(--color-brand);
+}
+
+/*
+ * Respect the OS "reduce motion" setting. Shimmer and transitions are
+ * decorative; nothing here carries information that motion alone conveys.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton {
+    animation: none;
+    background: var(--color-elevated);
+  }
+}

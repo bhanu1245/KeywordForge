@@ -1,0 +1,25 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# env
+.env
+.env.local
+.env*.local
+
+# prisma
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+src/generated/
+
+# exports produced by report/export jobs
+storage/exports/*
+!storage/exports/.gitkeep
+
+# misc
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:npm_config_yes='true'; npx --yes create-next-app@latest \"d:\\\\projects\\\\KeywordForge\" --ts --tailwind --eslint --app --src-dir --use-npm --no-import-alias --yes)",
+      "PowerShell(npm install next@latest react@latest react-dom@latest @prisma/client zod @tanstack/react-virtual exceljs @anthropic-ai/sdk --save 2>&1)",
+      "PowerShell(npm install -D typescript @types/node @types/react @types/react-dom prisma tailwindcss @tailwindcss/postcss 2>&1)",
+      "PowerShell(npx prisma generate 2>&1)",
+      "PowerShell(npx prisma --help 2>&1)",
+      "PowerShell(npm install -D \"prisma@^6\" 2>&1)",
+      "PowerShell(npm install \"@prisma/client@^6\" 2>&1)",
+      "PowerShell(npx prisma --version 2>&1)",
+      "PowerShell(npm install -D tsx 2>&1)",
+      "PowerShell(npm run db:seed 2>&1)"
+    ]
+  }
+}

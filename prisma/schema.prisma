@@ -1,0 +1,426 @@
+// KeywordForge — core data model (PRD §10)
+//
+// Two deliberate layers:
+//
+//   1. SHARED CORPUS (Keyword, KeywordMetric, SerpSnapshot, ProviderCache)
+//      Not tenant-scoped. Upstream keyword data costs real money per call
+//      (PRD §6/§12), so the cache must be shared across all tenants — if it
+//      were scoped per agency, every tenant would re-pay for "best jewellery
+//      shop near me". Nothing here is client-identifying: it is search-engine
+//      data, not customer data.
+//
+//   2. TENANT-SCOPED (Agency -> Client -> Project -> everything else)
+//      Every row a user can see hangs off an Agency. ProjectKeyword is the
+//      join that says "this tenant is working on this keyword". Isolation is
+//      enforced at the query layer via lib/tenancy.ts (PRD §12).
+//
+// Dev runs on SQLite for zero-setup. The schema is deliberately
+// Postgres-compatible: no enums (unsupported on SQLite), no native Json
+// columns — JSON is stored as TEXT and parsed at the edge. To move to
+// Postgres, change the datasource provider below and re-run migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Agency {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  // White-label branding, deferred to Phase 4 UI but stored from day one so
+  // report generation never needs a migration. JSON: { logoUrl, primaryColor }
+  branding  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users    User[]
+  clients  Client[]
+  apiKeys  ApiKey[]
+  jobs     Job[]
+  usage    ProviderCall[]
+
+  @@map("agencies")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  agencyId  String
+  email     String   @unique
+  name      String
+  // "owner" | "member" — coarse for MVP, expand when Agency Mode lands.
+  role      String   @default("member")
+  createdAt DateTime @default(now())
+
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@map("users")
+}
+
+model Client {
+  id        String   @id @default(cuid())
+  agencyId  String
+  name      String
+  // The client's own site, used for gap analysis in Phase 2.
+  domain    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  projects Project[]
+
+  @@index([agencyId])
+  @@map("clients")
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  clientId  String
+  name      String
+  domain    String?
+  // Default market for lookups in this project.
+  language  String   @default("en")
+  location  String   @default("United States")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  client          Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  projectKeywords ProjectKeyword[]
+  clusters        Cluster[]
+  competitors     Competitor[]
+  jobs            Job[]
+  exports         Export[]
+  topicMaps       TopicMap[]
+  usage           ProviderCall[]
+
+  @@index([clientId])
+  @@map("projects")
+}
+
+// ---------------------------------------------------------------------------
+// Shared keyword corpus (NOT tenant-scoped — see header)
+// ---------------------------------------------------------------------------
+
+model Keyword {
+  id        String   @id @default(cuid())
+  text      String
+  language  String   @default("en")
+  location  String   @default("United States")
+  // Cached derivations. Cheap to recompute, but storing them keeps the
+  // explorer table fast at 10K+ rows without a per-request classify pass.
+  intent      String? // informational | navigational | commercial | transactional
+  // 0..1 from the classifier. Persisted because a *defaulted* informational
+  // label and a *confident* one must not carry equal weight when a cluster
+  // votes on its overall intent.
+  intentConfidence Float @default(0)
+  wordCount   Int      @default(1)
+  isQuestion  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  metrics       KeywordMetric[]
+  serpSnapshots SerpSnapshot[]
+  serpRankings  SerpRanking[]
+  projectLinks  ProjectKeyword[]
+
+  // The corpus is deduplicated per market, not per tenant.
+  @@unique([text, language, location])
+  @@index([intent])
+  @@map("keywords")
+}
+
+// Time-series metrics. PRD §6: "you cannot buy someone else's history — you
+// have to accumulate your own from day one", so this is append-only by date
+// rather than a mutable column set on Keyword.
+model KeywordMetric {
+  id          String   @id @default(cuid())
+  keywordId   String
+  capturedAt  DateTime @default(now())
+  volume      Int?
+  cpc         Float?
+  competition Float? // 0..1, paid competition from the provider
+  difficulty  Int? // 0..100, our computed KD
+  // 12 months of relative volume, JSON int[]. Powers trend + seasonality.
+  trend       String?
+  source      String   @default("mock")
+
+  keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@index([keywordId, capturedAt])
+  @@map("keyword_metrics")
+}
+
+// Append-only history of what the SERP looked like (PRD §10 `serp_snapshots`).
+// Never updated — this is the record you cannot buy from anyone else.
+model SerpSnapshot {
+  id         String   @id @default(cuid())
+  keywordId  String
+  capturedAt DateTime @default(now())
+  // JSON array of { position, url, domain, title, description, domainStrength }
+  results    String
+  // JSON string[] of SERP features present: featured_snippet, people_also_ask...
+  features   String
+  // Mean authority of the top 10, cached so difficulty does not re-parse JSON.
+  meanStrength Float?
+  source     String   @default("mock")
+
+  keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@index([keywordId, capturedAt])
+  @@map("serp_snapshots")
+}
+
+// CURRENT rankings, flattened one row per (keyword, domain).
+//
+// SerpSnapshot keeps history but stores results as a JSON blob, which cannot
+// be queried by domain — and "which keywords does competitor X rank for" is
+// exactly a query by domain. So rankings are also denormalised here: replaced
+// wholesale on each analysis, indexed on domain, and the basis for every
+// competitor, gap and content-gap feature.
+model SerpRanking {
+  id         String   @id @default(cuid())
+  keywordId  String
+  domain     String
+  position   Int
+  url        String
+  capturedAt DateTime @default(now())
+
+  keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@unique([keywordId, domain])
+  @@index([domain])
+  @@index([keywordId])
+  @@map("serp_rankings")
+}
+
+// AI Topic Map (PRD §7 module 16) — the topical-authority structure for a
+// project: pillars and the supporting pages that link to them.
+model TopicMap {
+  id        String   @id @default(cuid())
+  projectId String
+  // JSON: { pillars: [{ title, targetKeyword, intent, volume, supporting[] }] }
+  content   String
+  model     String?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("topic_maps")
+}
+
+// Raw upstream response cache keyed by a hash of (provider, endpoint, params).
+// This is the single most important cost control in the system (PRD §12).
+model ProviderCache {
+  id         String   @id @default(cuid())
+  cacheKey   String   @unique
+  provider   String
+  endpoint   String
+  payload    String // JSON
+  fetchedAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([expiresAt])
+  @@map("provider_cache")
+}
+
+// Per-call cost ledger so spend can be attributed to a client/project.
+model ProviderCall {
+  id        String   @id @default(cuid())
+  agencyId  String?
+  projectId String?
+  provider  String
+  endpoint  String
+  // How many keyword/SERP units this call consumed.
+  units     Int      @default(1)
+  costUsd   Float    @default(0)
+  cacheHit  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  agency  Agency?  @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([agencyId, createdAt])
+  @@index([projectId, createdAt])
+  @@map("provider_calls")
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-scoped keyword work
+// ---------------------------------------------------------------------------
+
+// "This project is working on this keyword." Carries the tenant's own view of
+// the keyword (notes, a pinned opportunity score) without polluting the
+// shared corpus.
+model ProjectKeyword {
+  id        String   @id @default(cuid())
+  projectId String
+  keywordId String
+  // Where it came from: "discovery" | "import" | "manual"
+  source    String   @default("discovery")
+  // The seed that surfaced it, for grouping a research session.
+  seed      String?
+  addedAt   DateTime @default(now())
+
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  keyword         Keyword          @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  clusterKeywords ClusterKeyword[]
+
+  @@unique([projectId, keywordId])
+  @@index([projectId])
+  @@map("project_keywords")
+}
+
+model Cluster {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  intent    String?
+  // Denormalised roll-ups so the cluster list renders without N+1 aggregation.
+  totalVolume    Int   @default(0)
+  avgDifficulty  Float @default(0)
+  keywordCount   Int   @default(0)
+  createdAt DateTime @default(now())
+
+  project  Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  keywords ClusterKeyword[]
+  briefs   ContentBrief[]
+
+  @@index([projectId])
+  @@map("clusters")
+}
+
+model ClusterKeyword {
+  id               String @id @default(cuid())
+  clusterId        String
+  projectKeywordId String
+  // True for the head term the cluster is named after.
+  isPrimary        Boolean @default(false)
+
+  cluster        Cluster        @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  projectKeyword ProjectKeyword @relation(fields: [projectKeywordId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, projectKeywordId])
+  @@index([clusterId])
+  @@map("cluster_keywords")
+}
+
+// Phase 2, but the table exists now so briefs generated during Phase 1
+// experimentation are not thrown away.
+model ContentBrief {
+  id        String   @id @default(cuid())
+  clusterId String
+  title     String
+  // JSON: { targetKeyword, secondaryKeywords[], headings[], questions[], notes }
+  content   String
+  model     String?
+  createdAt DateTime @default(now())
+
+  cluster Cluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId])
+  @@map("content_briefs")
+}
+
+model Competitor {
+  id        String   @id @default(cuid())
+  projectId String
+  domain    String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, domain])
+  @@map("competitors")
+}
+
+// ---------------------------------------------------------------------------
+// Async work (PRD §12: bulk jobs must never block the UI)
+// ---------------------------------------------------------------------------
+
+model Job {
+  id        String   @id @default(cuid())
+  agencyId  String
+  projectId String?
+  // "bulk_enrich" | "discover" | "cluster" | "export"
+  type      String
+  // "queued" | "running" | "completed" | "failed" | "cancelled"
+  status    String   @default("queued")
+  progress  Int      @default(0)
+  total     Int      @default(0)
+  // JSON input params and output summary.
+  params    String?
+  result    String?
+  error     String?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  agency  Agency   @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId, createdAt])
+  @@index([status])
+  @@map("jobs")
+}
+
+model Export {
+  id        String   @id @default(cuid())
+  projectId String
+  // "csv" | "xlsx"
+  format    String
+  status    String   @default("queued")
+  filePath  String?
+  rowCount  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("exports")
+}
+
+// PRD §12 security: "audit log of exports (client data leaving the system)".
+// Deliberately append-only and never exposed through a delete endpoint — an
+// audit trail a tenant can erase is not an audit trail.
+model AuditLog {
+  id        String   @id @default(cuid())
+  agencyId  String
+  projectId String?
+  // "export.download" | "export.create" | ...
+  action    String
+  // JSON: whatever identifies the affected resource.
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([agencyId, createdAt])
+  @@map("audit_logs")
+}
+
+// Phase 4 public API (PRD §11) — keys are hashed at rest (PRD §12).
+model ApiKey {
+  id         String    @id @default(cuid())
+  agencyId   String
+  name       String
+  // sha256 of the key; the plaintext is shown once at creation.
+  hashedKey  String    @unique
+  prefix     String
+  scopes     String    @default("read")
+  rateLimit  Int       @default(60)
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+
+  @@index([agencyId])
+  @@map("api_keys")
+}

@@ -1,0 +1,363 @@
+/**
+ * The keyword pipeline: provider data in, scored and persisted rows out.
+ *
+ * Everything here is written batch-first. PRD §12 requires bulk jobs up to 1M
+ * keywords, so no code path may do one query per keyword — the enrichment
+ * below runs a fixed number of queries per chunk regardless of input size.
+ */
+
+import { prisma } from "../db";
+import { getProvider } from "../providers";
+import type { RawKeyword } from "../providers/types";
+import { classifyIntent, type Intent } from "../seo/intent";
+import type { KeywordFilters, KeywordRow } from "../types";
+import { isQuestion } from "../seo/questions";
+import { normalizeText, wordCount } from "../seo/normalize";
+import {
+  commercialValue,
+  keywordDifficulty,
+  opportunityScore,
+  trafficPotential,
+} from "../seo/scoring";
+
+/**
+ * SQLite binds one variable per column per row; chunking keeps us clear of
+ * the parameter ceiling and keeps memory flat on very large imports.
+ */
+const CHUNK = 400;
+
+function chunk<T>(items: T[], size = CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+export interface EnrichInput {
+  projectId: string;
+  language: string;
+  location: string;
+  keywords: RawKeyword[];
+  source?: "discovery" | "import" | "manual";
+  seed?: string | null;
+}
+
+export interface EnrichSummary {
+  received: number;
+  keywordsCreated: number;
+  linkedToProject: number;
+}
+
+/**
+ * Upserts keywords into the shared corpus, writes a metric snapshot, and
+ * links them to the project.
+ *
+ * NOTE ON `skipDuplicates`: Prisma does not support it on SQLite, so we read
+ * the existing rows and filter before inserting. Two queries instead of one,
+ * still O(1) per chunk. On Postgres this collapses to a single createMany
+ * with skipDuplicates.
+ */
+export async function enrichAndPersist(
+  input: EnrichInput,
+): Promise<EnrichSummary> {
+  const { projectId, language, location } = input;
+
+  // Normalise and de-duplicate up front — providers routinely return the same
+  // phrase with different casing/spacing.
+  const byText = new Map<string, RawKeyword>();
+  for (const raw of input.keywords) {
+    const text = normalizeText(raw.text);
+    if (!text) continue;
+    if (!byText.has(text)) byText.set(text, { ...raw, text });
+  }
+  const rows = [...byText.values()];
+  if (rows.length === 0) {
+    return { received: 0, keywordsCreated: 0, linkedToProject: 0 };
+  }
+
+  let keywordsCreated = 0;
+  let linkedToProject = 0;
+
+  for (const batch of chunk(rows)) {
+    const texts = batch.map((r) => r.text);
+
+    const existing = await prisma.keyword.findMany({
+      where: { text: { in: texts }, language, location },
+      select: { id: true, text: true },
+    });
+    const existingIds = new Map(existing.map((k) => [k.text, k.id]));
+    const toCreate = batch.filter((r) => !existingIds.has(r.text));
+
+    if (toCreate.length > 0) {
+      await prisma.keyword.createMany({
+        data: toCreate.map((r) => {
+          const { intent, confidence } = classifyIntent(r.text);
+          return {
+            text: r.text,
+            language,
+            location,
+            intent,
+            intentConfidence: confidence,
+            wordCount: wordCount(r.text),
+            isQuestion: isQuestion(r.text),
+          };
+        }),
+      });
+      keywordsCreated += toCreate.length;
+    }
+
+    const all = await prisma.keyword.findMany({
+      where: { text: { in: texts }, language, location },
+      select: { id: true, text: true, intent: true },
+    });
+    const idByText = new Map(all.map((k) => [k.text, k.id]));
+    const sourceName = getProvider().name;
+
+    // Metric snapshot. Append-only by design (PRD §6: history has to be
+    // accumulated from day one — we never overwrite a previous reading).
+    await prisma.keywordMetric.createMany({
+      data: batch.flatMap((r) => {
+        const keywordId = idByText.get(r.text);
+        if (!keywordId) return [];
+        return [
+          {
+            keywordId,
+            volume: r.volume ?? null,
+            cpc: r.cpc ?? null,
+            competition: r.competition ?? null,
+            difficulty: keywordDifficulty({
+              keyword: r.text,
+              volume: r.volume,
+              competition: r.competition,
+            }),
+            trend: r.trend ? JSON.stringify(r.trend) : null,
+            source: sourceName,
+          },
+        ];
+      }),
+    });
+
+    const keywordIds = batch
+      .map((r) => idByText.get(r.text))
+      .filter((id): id is string => Boolean(id));
+
+    const alreadyLinked = await prisma.projectKeyword.findMany({
+      where: { projectId, keywordId: { in: keywordIds } },
+      select: { keywordId: true },
+    });
+    const linkedSet = new Set(alreadyLinked.map((l) => l.keywordId));
+    const newLinks = keywordIds.filter((id) => !linkedSet.has(id));
+
+    if (newLinks.length > 0) {
+      await prisma.projectKeyword.createMany({
+        data: newLinks.map((keywordId) => ({
+          projectId,
+          keywordId,
+          source: input.source ?? "discovery",
+          seed: input.seed ?? null,
+        })),
+      });
+      linkedToProject += newLinks.length;
+    }
+  }
+
+  return { received: rows.length, keywordsCreated, linkedToProject };
+}
+
+export interface DiscoverInput {
+  projectId: string;
+  agencyId: string;
+  seed: string;
+  limit?: number;
+  language: string;
+  location: string;
+}
+
+/** Seed -> ideas -> scored rows persisted to the project (PRD §8 flow 1). */
+export async function discoverKeywords(
+  input: DiscoverInput,
+): Promise<EnrichSummary & { seed: string }> {
+  const provider = getProvider({
+    agencyId: input.agencyId,
+    projectId: input.projectId,
+  });
+  const ideas = await provider.keywordIdeas({
+    seed: input.seed,
+    limit: input.limit ?? 200,
+    language: input.language,
+    location: input.location,
+  });
+
+  const summary = await enrichAndPersist({
+    projectId: input.projectId,
+    language: input.language,
+    location: input.location,
+    keywords: ideas,
+    source: "discovery",
+    seed: normalizeText(input.seed),
+  });
+
+  return { ...summary, seed: normalizeText(input.seed) };
+}
+
+/** Enrich a list of raw keyword strings — the bulk CSV import path (flow 4). */
+export async function enrichKeywordList(input: {
+  projectId: string;
+  agencyId: string;
+  keywords: string[];
+  language: string;
+  location: string;
+  onProgress?: (done: number, total: number) => Promise<void> | void;
+}): Promise<EnrichSummary> {
+  const provider = getProvider({
+    agencyId: input.agencyId,
+    projectId: input.projectId,
+  });
+
+  const cleaned = [...new Set(input.keywords.map(normalizeText).filter(Boolean))];
+  const totals: EnrichSummary = {
+    received: 0,
+    keywordsCreated: 0,
+    linkedToProject: 0,
+  };
+
+  // Providers cap batch size on volume lookups; 400 keeps us well inside
+  // every provider's limit and gives the progress bar something to move.
+  for (const batch of chunk(cleaned, 400)) {
+    const metrics = await provider.searchVolume({
+      keywords: batch,
+      language: input.language,
+      location: input.location,
+    });
+
+    // Keywords the provider had no data for still belong in the project —
+    // dropping them would silently lose rows from the user's own import.
+    const returned = new Set(metrics.map((m) => m.text));
+    const padded = [
+      ...metrics,
+      ...batch
+        .filter((t) => !returned.has(t))
+        .map((text) => ({
+          text,
+          volume: null,
+          cpc: null,
+          competition: null,
+          trend: null,
+        })),
+    ];
+
+    const summary = await enrichAndPersist({
+      projectId: input.projectId,
+      language: input.language,
+      location: input.location,
+      keywords: padded,
+      source: "import",
+    });
+
+    totals.received += summary.received;
+    totals.keywordsCreated += summary.keywordsCreated;
+    totals.linkedToProject += summary.linkedToProject;
+
+    await input.onProgress?.(
+      Math.min(totals.received, cleaned.length),
+      cleaned.length,
+    );
+  }
+
+  return totals;
+}
+
+// ---------------------------------------------------------------------------
+// Reading back
+// ---------------------------------------------------------------------------
+
+// Row and filter shapes live in lib/types.ts so client components can import
+// them without pulling Prisma into the browser bundle.
+export type { KeywordRow, KeywordFilters } from "../types";
+
+/**
+ * Loads a project's keywords with their most recent metric snapshot.
+ *
+ * The scores (opportunity, traffic potential, commercial value) are computed
+ * on read rather than stored. They are pure functions of the stored inputs, so
+ * recomputing costs microseconds and means a weighting change takes effect
+ * everywhere instead of leaving stale numbers in old rows.
+ */
+export async function getProjectKeywords(
+  projectId: string,
+  filters: KeywordFilters = {},
+): Promise<KeywordRow[]> {
+  const links = await prisma.projectKeyword.findMany({
+    where: {
+      projectId,
+      ...(filters.seed ? { seed: filters.seed } : {}),
+      keyword: {
+        ...(filters.search
+          ? { text: { contains: normalizeText(filters.search) } }
+          : {}),
+        ...(filters.questionsOnly ? { isQuestion: true } : {}),
+        ...(filters.intents?.length ? { intent: { in: filters.intents } } : {}),
+        ...(filters.minWords ? { wordCount: { gte: filters.minWords } } : {}),
+      },
+    },
+    include: {
+      keyword: {
+        include: {
+          // Latest snapshot only — the full series is for the trend view.
+          metrics: { orderBy: { capturedAt: "desc" }, take: 1 },
+        },
+      },
+    },
+  });
+
+  const rows: KeywordRow[] = [];
+  for (const link of links) {
+    const kw = link.keyword;
+    const metric = kw.metrics[0];
+    const intent = (kw.intent as Intent | null) ?? classifyIntent(kw.text).intent;
+    const difficulty =
+      metric?.difficulty ??
+      keywordDifficulty({
+        keyword: kw.text,
+        volume: metric?.volume,
+        competition: metric?.competition,
+      });
+
+    const volume = metric?.volume ?? null;
+    const cpc = metric?.cpc ?? null;
+
+    if (filters.minVolume !== undefined && (volume ?? 0) < filters.minVolume) continue;
+    if (filters.maxVolume !== undefined && (volume ?? 0) > filters.maxVolume) continue;
+    if (filters.maxDifficulty !== undefined && difficulty > filters.maxDifficulty) continue;
+    if (filters.minDifficulty !== undefined && difficulty < filters.minDifficulty) continue;
+
+    let trend: number[] | null = null;
+    if (metric?.trend) {
+      try {
+        trend = JSON.parse(metric.trend) as number[];
+      } catch {
+        trend = null;
+      }
+    }
+
+    rows.push({
+      projectKeywordId: link.id,
+      keywordId: kw.id,
+      text: kw.text,
+      volume,
+      cpc,
+      competition: metric?.competition ?? null,
+      difficulty,
+      intent,
+      wordCount: kw.wordCount,
+      isQuestion: kw.isQuestion,
+      intentConfidence: kw.intentConfidence,
+      opportunity: opportunityScore({ volume, difficulty, intent }),
+      trafficPotential: trafficPotential(volume),
+      commercialValue: commercialValue(volume, cpc),
+      trend,
+      seed: link.seed,
+    });
+  }
+
+  return rows.sort((a, b) => b.opportunity - a.opportunity);
+}
