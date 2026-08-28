@@ -28,9 +28,19 @@ export interface KeywordRow {
   commercialValue: number;
   trend: number[] | null;
   seed: string | null;
+  /** Search surface these metrics describe. */
+  channel: string;
+  /** Derived from `trend` — see lib/seo/trends.ts. */
+  trendDirection: "rising" | "falling" | "stable";
+  trendChangePercent: number;
+  isSeasonal: boolean;
+  peakMonths: string[];
 }
 
 export interface KeywordFilters {
+  channel?: string;
+  trendDirection?: "rising" | "falling" | "stable";
+  seasonalOnly?: boolean;
   search?: string;
   minVolume?: number;
   maxVolume?: number;

@@ -77,13 +77,17 @@ async function throughCache<T>(
   params: unknown,
   ctx: UsageContext,
   fetcher: () => Promise<ProviderResponse<T>>,
+  /** Skip the read, but still write the result and bill the call. */
+  bypassRead = false,
 ): Promise<T> {
   const key = cacheKey(provider, endpoint, params);
   const now = new Date();
 
-  const hit = await prisma.providerCache
-    .findFirst({ where: { cacheKey: key, expiresAt: { gt: now } } })
-    .catch(() => null);
+  const hit = bypassRead
+    ? null
+    : await prisma.providerCache
+        .findFirst({ where: { cacheKey: key, expiresAt: { gt: now } } })
+        .catch(() => null);
 
   if (hit) {
     await recordCall(provider, endpoint, 0, 0, true, ctx);
@@ -213,7 +217,19 @@ export function withCaching(
       return [...found, ...response.data];
     },
 
-    serp: (input) =>
-      throughCache(provider.name, "serp", input, ctx, () => provider.serp(input)),
+    /**
+     * `fresh` is excluded from the cache key: it changes how the cache is
+     * READ, not what the response is. Including it would create a parallel
+     * cache entry per flag and double the storage for identical data.
+     */
+    serp: ({ fresh, ...input }) =>
+      throughCache(
+        provider.name,
+        "serp",
+        input,
+        ctx,
+        () => provider.serp({ ...input, fresh }),
+        fresh === true,
+      ),
   };
 }

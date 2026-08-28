@@ -73,12 +73,26 @@ export async function getCompetitorLandscape(
   }
 
   const trackedSet = new Set(tracked.map((t) => normaliseDomain(t.domain)));
+
+  // SerpRanking is keyed on URL, so a domain can appear several times for one
+  // keyword. Collapse to its BEST position per keyword first — otherwise a
+  // cannibalising competitor would be double-counted and its average position
+  // dragged down by its own second listing.
+  const best = new Map<string, { domain: string; keywordId: string; position: number }>();
+  for (const r of rankings) {
+    const key = `${r.keywordId}|${r.domain}`;
+    const current = best.get(key);
+    if (!current || r.position < current.position) {
+      best.set(key, { domain: r.domain, keywordId: r.keywordId, position: r.position });
+    }
+  }
+
   const acc = new Map<
     string,
     { count: number; volume: number; positions: number[]; topThree: number }
   >();
 
-  for (const r of rankings) {
+  for (const r of best.values()) {
     const entry = acc.get(r.domain) ?? { count: 0, volume: 0, positions: [], topThree: 0 };
     entry.count++;
     entry.volume += volumeByKeyword.get(r.keywordId) ?? 0;
@@ -145,10 +159,16 @@ export async function getCompetitorKeywords(
   const rows: CompetitorKeyword[] = [];
   for (const link of links) {
     const kw = link.keyword;
-    const theirs = kw.serpRankings.find((r) => r.domain === competitor);
+    // Best position per domain — a domain may hold several URLs per keyword.
+    const bestFor = (d: string) =>
+      kw.serpRankings
+        .filter((r) => r.domain === d)
+        .sort((a, b) => a.position - b.position)[0];
+
+    const theirs = bestFor(competitor);
     if (!theirs) continue;
 
-    const ours = own ? kw.serpRankings.find((r) => r.domain === own) : undefined;
+    const ours = own ? bestFor(own) : undefined;
     const ownPosition = ours?.position ?? null;
 
     rows.push({

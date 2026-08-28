@@ -2,6 +2,7 @@ import { z } from "zod";
 import { handleError, ok, parseQuery } from "@/lib/api";
 import { getProjectKeywords, type KeywordFilters } from "@/lib/keywords/service";
 import { INTENTS } from "@/lib/seo/intent";
+import { CHANNELS } from "@/lib/providers/types";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
 
 /** Query params arrive as strings; coerce and validate in one place. */
@@ -22,6 +23,12 @@ const schema = z.object({
     .transform((v) => (Array.isArray(v) ? v : v.split(",")))
     .optional(),
   seed: z.string().optional(),
+  channel: z.enum(CHANNELS).optional(),
+  trendDirection: z.enum(["rising", "falling", "stable"]).optional(),
+  seasonalOnly: z
+    .union([z.literal("true"), z.literal("false")])
+    .transform((v) => v === "true")
+    .optional(),
 });
 
 /** GET /api/v1/keywords?projectId=... — the explorer's filtered read. */
@@ -45,6 +52,9 @@ export async function GET(request: Request) {
       questionsOnly: query.questionsOnly,
       intents: intents?.length ? intents : undefined,
       seed: query.seed,
+      channel: query.channel,
+      trendDirection: query.trendDirection,
+      seasonalOnly: query.seasonalOnly,
     };
 
     const keywords = await getProjectKeywords(project.id, filters);

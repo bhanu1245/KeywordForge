@@ -2,6 +2,7 @@ import { z } from "zod";
 import { fail, handleError, ok, parseBody } from "@/lib/api";
 import { discoverKeywords, getProjectKeywords } from "@/lib/keywords/service";
 import { normalizeText } from "@/lib/seo/normalize";
+import { CHANNELS } from "@/lib/providers/types";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
 import { enqueueJob } from "@/lib/jobs/runner";
 
@@ -16,6 +17,8 @@ const schema = z.object({
    * trip for 200 rows.
    */
   async: z.boolean().optional(),
+  /** Search surface to discover on (PRD §7 modules 23-25). */
+  channel: z.enum(CHANNELS).optional(),
 });
 
 /** POST /api/v1/keywords/discover — seed keyword -> scored keyword ideas. */
@@ -35,11 +38,13 @@ export async function POST(request: Request) {
     }
 
     const limit = body.limit ?? 200;
+    const channel = body.channel ?? "google";
     const params = {
       seed: body.seed,
       limit,
       language: project.language,
       location: project.location,
+      channel,
     };
 
     if (body.async || limit > 500) {
@@ -58,9 +63,12 @@ export async function POST(request: Request) {
       agencyId,
       ...params,
     });
-    const keywords = await getProjectKeywords(project.id, { seed: summary.seed });
+    const keywords = await getProjectKeywords(project.id, {
+      seed: summary.seed,
+      channel,
+    });
 
-    return ok({ ...summary, keywords });
+    return ok({ ...summary, channel, keywords });
   } catch (error) {
     return handleError(error);
   }

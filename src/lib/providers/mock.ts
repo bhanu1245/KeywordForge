@@ -15,6 +15,8 @@
 import { classifyIntent } from "../seo/intent";
 import { normalizeText, tokenize, wordCount } from "../seo/normalize";
 import { profileForSeed } from "./verticals";
+import { getChannelProfile } from "./channels";
+import type { Channel } from "./types";
 import type {
   KeywordDataProvider,
   KeywordIdeasInput,
@@ -96,12 +98,23 @@ const SERP_FEATURE_POOL = [
 /**
  * Builds the idea set from the seed's own vertical, so a medical seed never
  * picks up retail modifiers and a software seed never gets "near me".
+ *
+ * On a non-Google channel the channel's own modifiers REPLACE the vertical
+ * ones. Mixing them produces cross-surface nonsense — "handmade gold rings
+ * unboxing", "diabetes symptoms prime" — because the two lists describe
+ * different kinds of demand, not two halves of the same one.
  */
-function buildCandidates(seed: string, limit: number): string[] {
+function buildCandidates(seed: string, limit: number, channel: Channel = "google"): string[] {
   const s = normalizeText(seed);
   if (!s) return [];
 
-  const profile = profileForSeed(s);
+  const vertical = profileForSeed(s);
+  const chan = getChannelProfile(channel);
+  const profile =
+    channel === "google"
+      ? vertical
+      : { ...vertical, prefixes: chan.prefixes, suffixes: chan.suffixes, questions: [] };
+
   const out = new Set<string>([s]);
 
   // A modifier that reuses ANY word from the seed produces junk like "pizza
@@ -190,9 +203,15 @@ function synthTrend(keyword: string, market: string): number[] {
   });
 }
 
-function toRawKeyword(text: string, market: string, cpcMultiplier = 1): RawKeyword {
-  const volume = synthVolume(text, market);
-  const cpc = synthCpc(text, market, cpcMultiplier);
+function toRawKeyword(
+  text: string,
+  market: string,
+  cpcMultiplier = 1,
+  channel: Channel = "google",
+): RawKeyword {
+  const chan = getChannelProfile(channel);
+  const volume = Math.round(synthVolume(text, market) * chan.volumeScale);
+  const cpc = Number((synthCpc(text, market, cpcMultiplier) * chan.cpcScale).toFixed(2));
   return {
     text,
     volume,
@@ -209,11 +228,14 @@ export class MockKeywordProvider implements KeywordDataProvider {
   async keywordIdeas(
     input: KeywordIdeasInput,
   ): Promise<ProviderResponse<RawKeyword[]>> {
-    const market = `${input.language}:${input.location}`;
+    const channel = input.channel ?? "google";
+    // Channel is part of the cache/determinism key: the same seed must yield
+    // different numbers per surface, consistently.
+    const market = `${input.language}:${input.location}:${channel}`;
     const { cpcMultiplier } = profileForSeed(input.seed);
-    const candidates = buildCandidates(input.seed, input.limit);
+    const candidates = buildCandidates(input.seed, input.limit, channel);
     const data = candidates
-      .map((text) => toRawKeyword(text, market, cpcMultiplier))
+      .map((text) => toRawKeyword(text, market, cpcMultiplier, channel))
       .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
     return { data, unitsConsumed: 1, costUsd: 0 };
   }
@@ -221,13 +243,16 @@ export class MockKeywordProvider implements KeywordDataProvider {
   async searchVolume(
     input: SearchVolumeInput,
   ): Promise<ProviderResponse<RawKeyword[]>> {
-    const market = `${input.language}:${input.location}`;
+    const channel = input.channel ?? "google";
+    const market = `${input.language}:${input.location}:${channel}`;
     // Each keyword is priced by its own vertical — a bulk import is usually a
     // mixed bag, not one niche.
     const data = input.keywords
       .map((k) => normalizeText(k))
       .filter(Boolean)
-      .map((text) => toRawKeyword(text, market, profileForSeed(text).cpcMultiplier));
+      .map((text) =>
+        toRawKeyword(text, market, profileForSeed(text).cpcMultiplier, channel),
+      );
     // Real providers bill per keyword on volume lookups, not per request.
     return { data, unitsConsumed: data.length, costUsd: 0 };
   }

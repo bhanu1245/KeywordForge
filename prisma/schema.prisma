@@ -100,6 +100,8 @@ model Project {
   jobs            Job[]
   exports         Export[]
   topicMaps       TopicMap[]
+  rankEntries     RankTrackingEntry[]
+  alerts          Alert[]
   usage           ProviderCall[]
 
   @@index([clientId])
@@ -115,6 +117,12 @@ model Keyword {
   text      String
   language  String   @default("en")
   location  String   @default("United States")
+  // Which search surface these metrics describe: google | google_maps |
+  // youtube | amazon (PRD §7 modules 23-25). The SAME phrase has genuinely
+  // different volume and intent per channel — "gold rings" on Amazon is a
+  // buying query, on YouTube it is a how-to — so channel is part of the
+  // corpus identity rather than a display filter.
+  channel   String   @default("google")
   // Cached derivations. Cheap to recompute, but storing them keeps the
   // explorer table fast at 10K+ rows without a per-request classify pass.
   intent      String? // informational | navigational | commercial | transactional
@@ -129,11 +137,13 @@ model Keyword {
   metrics       KeywordMetric[]
   serpSnapshots SerpSnapshot[]
   serpRankings  SerpRanking[]
+  rankEntries   RankTrackingEntry[]
   projectLinks  ProjectKeyword[]
 
-  // The corpus is deduplicated per market, not per tenant.
-  @@unique([text, language, location])
+  // The corpus is deduplicated per market AND channel, not per tenant.
+  @@unique([text, language, location, channel])
   @@index([intent])
+  @@index([channel])
   @@map("keywords")
 }
 
@@ -195,10 +205,73 @@ model SerpRanking {
 
   keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
 
-  @@unique([keywordId, domain])
+  // Keyed on URL, not domain, so a domain holding SEVERAL positions for one
+  // keyword keeps all of them. Collapsing to one row per domain (the earlier
+  // shape) discarded exactly the signal keyword cannibalisation is detected
+  // from — the same site ranking twice with two competing pages. Consumers
+  // that want one row per domain take the best position explicitly.
+  @@unique([keywordId, url])
   @@index([domain])
   @@index([keywordId])
   @@map("serp_rankings")
+}
+
+// Rank Tracker (PRD §7 module 21, §10 `rank_tracking_entries`).
+//
+// Append-only: one row per keyword per check. Position is nullable because
+// "not in the top 100 today" is a real, meaningful observation — collapsing it
+// to a missing row would make a drop out of the rankings invisible.
+model RankTrackingEntry {
+  id        String   @id @default(cuid())
+  projectId String
+  keywordId String
+  domain    String
+  position  Int?
+  url       String?
+  checkedAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, checkedAt])
+  @@index([keywordId, checkedAt])
+  @@map("rank_tracking_entries")
+}
+
+// Keyword Alerts (PRD §7 module 29, §10 `alerts`).
+model Alert {
+  id        String   @id @default(cuid())
+  projectId String
+  // "rank_drop" | "rank_gain" | "lost_ranking" | "new_competitor"
+  type      String
+  // Threshold in positions, or count, depending on type.
+  threshold Int      @default(3)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  AlertEvent[]
+
+  @@index([projectId])
+  @@map("alerts")
+}
+
+// A fired alert. Kept rather than only notified, so the workspace can show
+// "what changed since last time" without an email round trip.
+model AlertEvent {
+  id        String   @id @default(cuid())
+  alertId   String
+  keywordId String?
+  message   String
+  // JSON with the before/after values that triggered it.
+  detail    String?
+  acknowledged Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([alertId, createdAt])
+  @@map("alert_events")
 }
 
 // AI Topic Map (PRD §7 module 16) — the topical-authority structure for a

@@ -12,18 +12,30 @@ import type {
 import { isLongTail, isQuestion } from "@/lib/seo/questions";
 import { normalizeText } from "@/lib/seo/normalize";
 import type { SerpCoverageView } from "@/lib/types";
+import { ChannelPanel } from "./ChannelPanel";
 import { ClusterPanel } from "./ClusterPanel";
 import { CompetitorPanel } from "./CompetitorPanel";
 import { FilterBar } from "./FilterBar";
 import { Icon } from "./Icon";
 import { ImportPanel } from "./ImportPanel";
 import { KeywordTable } from "./KeywordTable";
+import { RankPanel } from "./RankPanel";
 import { SeedGenerator } from "./SeedGenerator";
 import { SerpPanel } from "./SerpPanel";
 import { TopicMapPanel } from "./TopicMapPanel";
+import { TrendsPanel } from "./TrendsPanel";
 import { Button, EmptyState, Stat, formatCompact, formatCurrency, formatNumber } from "./ui";
 
-type Tab = "explorer" | "clusters" | "serp" | "competitors" | "topicmap" | "import";
+type Tab =
+  | "explorer"
+  | "clusters"
+  | "serp"
+  | "competitors"
+  | "topicmap"
+  | "rank"
+  | "channels"
+  | "trends"
+  | "import";
 
 export interface WorkspaceProject {
   id: string;
@@ -195,12 +207,19 @@ export function Workspace({
 
   const analyzedSerps = serpCoverage?.analyzed ?? 0;
 
-  const TABS: Array<[Tab, string, "table" | "layers" | "upload" | "search" | "target", number | null]> = [
+  const risingCount = keywords.filter((k) => k.trendDirection === "rising").length;
+
+  const TABS: Array<
+    [Tab, string, "table" | "layers" | "upload" | "search" | "target" | "arrowUp", number | null]
+  > = [
     ["explorer", "Explorer", "table", filtered.length],
     ["clusters", "Clusters", "layers", clusters.length],
     ["serp", "SERP", "search", analyzedSerps],
     ["competitors", "Competitors", "target", null],
     ["topicmap", "Topic map", "layers", null],
+    ["rank", "Rank", "arrowUp", null],
+    ["channels", "Channels", "search", null],
+    ["trends", "Trends", "arrowUp", risingCount],
     ["import", "Import", "upload", null],
   ];
 
@@ -386,6 +405,12 @@ export function Workspace({
         {tab === "topicmap" && (
           <TopicMapPanel projectId={project.id} hasClusters={clusters.length > 0} />
         )}
+
+        {tab === "rank" && <RankPanel projectId={project.id} />}
+
+        {tab === "channels" && <ChannelPanel projectId={project.id} />}
+
+        {tab === "trends" && <TrendsPanel keywords={keywords} />}
 
         {tab === "import" && (
           <ImportPanel

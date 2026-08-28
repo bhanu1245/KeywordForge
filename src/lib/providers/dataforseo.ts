@@ -118,11 +118,32 @@ export class DataForSeoProvider implements KeywordDataProvider {
     };
   }
 
+  /**
+   * Per-channel endpoints (PRD §6 maps each surface to its own source).
+   * Like the rest of this class these are unverified against the live API —
+   * confirm the paths and response shapes on first connection.
+   */
+  private static ideasEndpoint(channel: string): string {
+    switch (channel) {
+      case "amazon":
+        return "/v3/dataforseo_labs/amazon/related_keywords/live";
+      case "youtube":
+        return "/v3/dataforseo_labs/youtube/related_keywords/live";
+      // Maps demand is Google demand filtered to local intent; DataForSEO has
+      // no separate Maps ideas endpoint, so the Google one is used and the
+      // local character comes from the location parameter.
+      case "google_maps":
+      case "google":
+      default:
+        return "/v3/dataforseo_labs/google/keyword_ideas/live";
+    }
+  }
+
   async keywordIdeas(
     input: KeywordIdeasInput,
   ): Promise<ProviderResponse<RawKeyword[]>> {
     const json = await this.post(
-      "/v3/dataforseo_labs/google/keyword_ideas/live",
+      DataForSeoProvider.ideasEndpoint(input.channel ?? "google"),
       {
         keywords: [input.seed],
         language_code: input.language,

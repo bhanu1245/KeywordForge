@@ -9,9 +9,19 @@
  *  2. Report `unitsConsumed` honestly — it drives the per-client cost ledger.
  */
 
+/**
+ * Search surfaces (PRD §7 modules 23-25). Each is a different demand curve for
+ * the same phrase, not a filter over one dataset — PRD §6 maps each to its own
+ * upstream endpoint.
+ */
+export const CHANNELS = ["google", "google_maps", "youtube", "amazon"] as const;
+export type Channel = (typeof CHANNELS)[number];
+
 export interface MarketOptions {
   language: string;
   location: string;
+  /** Defaults to "google" when omitted. */
+  channel?: Channel;
 }
 
 /** A keyword as the upstream source describes it, before our own scoring. */
@@ -65,6 +75,17 @@ export interface SearchVolumeInput extends MarketOptions {
 export interface SerpInput extends MarketOptions {
   keyword: string;
   depth?: number;
+  /**
+   * Bypass the response cache and fetch a genuinely current SERP.
+   *
+   * Rank tracking REQUIRES this. The default 30-day cache exists to stop
+   * re-paying for the same keyword (PRD §12), but a daily rank check served
+   * from that cache would replay a month-old SERP and record the same
+   * position every day — reporting "no movement" for thirty days no matter
+   * what actually happened. Freshness costs money, so it is opt-in and only
+   * the rank-check path sets it.
+   */
+  fresh?: boolean;
 }
 
 export interface KeywordDataProvider {

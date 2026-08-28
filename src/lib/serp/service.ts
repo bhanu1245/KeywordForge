@@ -28,6 +28,11 @@ export interface AnalyzeSerpInput {
   location: string;
   /** The project's own domain, so its rankings are recorded too. */
   ownDomain?: string | null;
+  /**
+   * Force a live SERP rather than a cached one. Set by rank checks, which are
+   * meaningless against a cached result — see SerpInput.fresh.
+   */
+  fresh?: boolean;
   onProgress?: (done: number, total: number) => Promise<void> | void;
 }
 
@@ -57,6 +62,7 @@ function seedOwnDomain(
   // Rank for roughly 40% of keywords, biased to mid positions.
   if (h % 100 >= 40) return results;
 
+  const slug = keyword.replace(/\s+/g, "-");
   const slot = 2 + (h % 7); // positions 3–9
   if (slot >= results.length) return results;
 
@@ -64,9 +70,27 @@ function seedOwnDomain(
   clone[slot] = {
     ...clone[slot],
     domain: ownDomain,
-    url: `https://${ownDomain}/${keyword.replace(/\s+/g, "-")}`,
+    url: `https://${ownDomain}/${slug}`,
     title: `${keyword} — ${ownDomain.split(".")[0]}`,
   };
+
+  // For a minority of keywords, place a SECOND page from the same domain.
+  // Cannibalisation (module 26) is a real and common problem, and with one
+  // ranking per keyword the panel would read "0" forever on sample data —
+  // indistinguishable from the detector being broken.
+  if (h % 100 < 12) {
+    const second = slot + 2 + (h % 3);
+    if (second < clone.length) {
+      clone[second] = {
+        ...clone[second],
+        domain: ownDomain,
+        // A DIFFERENT URL — the same page twice is not cannibalisation.
+        url: `https://${ownDomain}/blog/${slug}-guide`,
+        title: `${keyword} guide — ${ownDomain.split(".")[0]}`,
+      };
+    }
+  }
+
   return clone;
 }
 
@@ -112,6 +136,7 @@ export async function analyzeSerps(
       language: input.language,
       location: input.location,
       depth: 10,
+      fresh: input.fresh,
     });
 
     let results = serp.results;
@@ -140,16 +165,21 @@ export async function analyzeSerps(
     // Replace current rankings wholesale — this table is "where things stand
     // now"; history lives in SerpSnapshot.
     await prisma.serpRanking.deleteMany({ where: { keywordId: kw.id } });
-    const seen = new Set<string>();
+
+    // Keep EVERY position, one row per URL. A domain holding two positions
+    // with two different pages is exactly what cannibalisation detection
+    // reads (module 26); collapsing to best-per-domain would erase it.
+    const seenUrls = new Set<string>();
+    const domains = new Set<string>();
     const rows = results.flatMap((r) => {
       const domain = normaliseDomain(r.domain);
-      // A domain can hold several positions for one keyword; keep its best.
-      if (!domain || seen.has(domain)) return [];
-      seen.add(domain);
+      if (!domain || !r.url || seenUrls.has(r.url)) return [];
+      seenUrls.add(r.url);
+      domains.add(domain);
       return [{ keywordId: kw.id, domain, position: r.position, url: r.url }];
     });
     if (rows.length > 0) await prisma.serpRanking.createMany({ data: rows });
-    if (ownDomain && seen.has(ownDomain)) ownRankings++;
+    if (ownDomain && domains.has(ownDomain)) ownRankings++;
 
     for (const feature of serp.features) {
       featuresFound[feature] = (featuresFound[feature] ?? 0) + 1;

@@ -58,7 +58,29 @@ Other commands:
 | 19 | Opportunity Score | `src/lib/seo/scoring.ts` |
 | 20 | Traffic Potential | `src/lib/seo/scoring.ts` |
 
-Two things worth knowing about this layer:
+### Phase 3 — tracking & vertical expansion (complete)
+
+| # | PRD Phase 3 module | Where |
+|---|---|---|
+| 21 | Rank Tracker | `src/lib/rank/service.ts`, `POST /api/v1/rank-tracking` |
+| 22 | Local SEO | `src/lib/local/service.ts` |
+| 23 | Google Maps Keywords | `channel=google_maps` |
+| 24 | YouTube Keywords | `channel=youtube` |
+| 25 | Amazon Keywords | `channel=amazon` |
+| 26 | Keyword Cannibalization | `getCannibalisation()` |
+| 27 | Trend Detection | `src/lib/seo/trends.ts` |
+| 28 | Seasonality | same |
+| 29 | Keyword Alerts | `src/lib/alerts/service.ts` |
+
+**Channel is corpus identity, not a filter.** The same phrase has a genuinely different demand curve per surface — "gold rings" is a buying query on Amazon and a how-to on YouTube — so each channel is its own `Keyword` row with its own volume and CPC. Mixing them in one table would silently compare a YouTube volume against a Google one.
+
+**Rank checks bypass the response cache.** The 30-day cache is the main cost control (PRD §12), but a daily rank check served from it would replay a month-old SERP and record the same position every day — reporting "no movement" for thirty days regardless of reality. `SerpInput.fresh` opts out; only the rank-check path sets it, because freshness costs money.
+
+**Trend and seasonality cost nothing.** Both read the 12-month series that already arrives with every volume lookup. Trend compares quarter-over-quarter rather than first-vs-last month, because a purely seasonal keyword returns to its starting level and a naive comparison would report a permanent "decline" every year.
+
+**Two Phase 3 modules cannot be fully demonstrated on sample data.** Mock SERPs are deterministic, so positions do not drift between rank checks — `improved`/`declined` stay at 0 and the rank-movement alerts never fire. That is honest rather than broken: fabricating movement would produce fake "your ranking dropped" events an agency might screenshot for a client. The `new_competitor` alert, which does not depend on movement, fires normally. Real movement appears once a live provider is connected.
+
+Two things worth knowing about the Phase 2 layer:
 
 **Competitor data is bounded, and the UI says so.** Ahrefs answers "what does X rank for" from its own web-scale index. Everything here is derived from the SERPs *this project* has actually collected, so a competitor's keyword set is only ever as complete as the SERP analysis you have run. Within the project's own keyword set it is accurate — it comes from the live SERP, not an estimate — but it is not their full organic footprint.
 
@@ -191,6 +213,9 @@ The `lib/seo` layer has no database or network dependency, which is why the test
 | `GET`/`POST`/`DELETE` | `/api/v1/competitors` (`view=landscape\|keywords\|gap`) |
 | `GET`/`POST` | `/api/v1/topic-map` |
 | `POST` | `/api/v1/keywords/generate` (seeds from description or URL) |
+| `GET`/`POST` | `/api/v1/rank-tracking` (`view=summary\|cannibalisation`, `keywordId=` for history) |
+| `GET`/`POST`/`PATCH` | `/api/v1/alerts` |
+| `GET` | `/api/v1/local` |
 | `POST` | `/api/v1/exports` → `202` + job id |
 | `GET` | `/api/v1/exports/{id}/download` |
 
@@ -203,4 +228,5 @@ Routes are already shaped for the Phase 4 public API: they parse, authorise via 
 1. **Add authentication**, replacing `resolveContext()`. Nothing ships to a client without it.
 2. **Connect DataForSEO** and verify the response parsing against live data — `dataforseo.ts` has never run against the real API.
 3. **Move to Postgres + Redis/BullMQ** before running more than one instance.
-4. Then Phase 3: Rank Tracker, Local SEO, cannibalisation, seasonality, alerts. `SerpRanking` already stores current positions, so rank tracking is largely a scheduling problem on top of the existing SERP job.
+4. **Add a scheduler.** Rank checks are triggered manually or by an external cron hitting `POST /api/v1/rank-tracking`. PRD §5 sets the cadence as daily; there is no in-app scheduler yet.
+5. Then Phase 4: Backlinks and Domain Authority (both need a licensed index — PRD §6), Revenue Potential, API-key auth for the public API, bulk at 100K–1M, and the white-label Agency Mode UI.

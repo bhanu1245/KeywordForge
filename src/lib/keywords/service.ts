@@ -8,10 +8,11 @@
 
 import { prisma } from "../db";
 import { getProvider } from "../providers";
-import type { RawKeyword } from "../providers/types";
+import type { Channel, RawKeyword } from "../providers/types";
 import { classifyIntent, type Intent } from "../seo/intent";
 import type { KeywordFilters, KeywordRow } from "../types";
 import { isQuestion } from "../seo/questions";
+import { detectSeasonality, detectTrend } from "../seo/trends";
 import { normalizeText, wordCount } from "../seo/normalize";
 import {
   commercialValue,
@@ -39,6 +40,8 @@ export interface EnrichInput {
   keywords: RawKeyword[];
   source?: "discovery" | "import" | "manual";
   seed?: string | null;
+  /** Search surface these metrics belong to. Part of corpus identity. */
+  channel?: Channel;
 }
 
 export interface EnrichSummary {
@@ -60,6 +63,7 @@ export async function enrichAndPersist(
   input: EnrichInput,
 ): Promise<EnrichSummary> {
   const { projectId, language, location } = input;
+  const channel: Channel = input.channel ?? "google";
 
   // Normalise and de-duplicate up front — providers routinely return the same
   // phrase with different casing/spacing.
@@ -81,7 +85,7 @@ export async function enrichAndPersist(
     const texts = batch.map((r) => r.text);
 
     const existing = await prisma.keyword.findMany({
-      where: { text: { in: texts }, language, location },
+      where: { text: { in: texts }, language, location, channel },
       select: { id: true, text: true },
     });
     const existingIds = new Map(existing.map((k) => [k.text, k.id]));
@@ -95,6 +99,7 @@ export async function enrichAndPersist(
             text: r.text,
             language,
             location,
+            channel,
             intent,
             intentConfidence: confidence,
             wordCount: wordCount(r.text),
@@ -106,7 +111,7 @@ export async function enrichAndPersist(
     }
 
     const all = await prisma.keyword.findMany({
-      where: { text: { in: texts }, language, location },
+      where: { text: { in: texts }, language, location, channel },
       select: { id: true, text: true, intent: true },
     });
     const idByText = new Map(all.map((k) => [k.text, k.id]));
@@ -170,6 +175,7 @@ export interface DiscoverInput {
   limit?: number;
   language: string;
   location: string;
+  channel?: Channel;
 }
 
 /** Seed -> ideas -> scored rows persisted to the project (PRD §8 flow 1). */
@@ -185,6 +191,7 @@ export async function discoverKeywords(
     limit: input.limit ?? 200,
     language: input.language,
     location: input.location,
+    channel: input.channel,
   });
 
   const summary = await enrichAndPersist({
@@ -194,6 +201,7 @@ export async function discoverKeywords(
     keywords: ideas,
     source: "discovery",
     seed: normalizeText(input.seed),
+    channel: input.channel,
   });
 
   return { ...summary, seed: normalizeText(input.seed) };
@@ -291,6 +299,9 @@ export async function getProjectKeywords(
       projectId,
       ...(filters.seed ? { seed: filters.seed } : {}),
       keyword: {
+        // Defaults to Google: mixing channels in one table would silently
+        // compare a YouTube volume against a Google one.
+        channel: filters.channel ?? "google",
         ...(filters.search
           ? { text: { contains: normalizeText(filters.search) } }
           : {}),
@@ -339,10 +350,21 @@ export async function getProjectKeywords(
       }
     }
 
+    const trendResult = detectTrend(trend);
+    const seasonality = detectSeasonality(trend);
+
+    if (filters.trendDirection && trendResult.direction !== filters.trendDirection) continue;
+    if (filters.seasonalOnly && !seasonality.isSeasonal) continue;
+
     rows.push({
       projectKeywordId: link.id,
       keywordId: kw.id,
       text: kw.text,
+      channel: kw.channel,
+      trendDirection: trendResult.direction,
+      trendChangePercent: trendResult.changePercent,
+      isSeasonal: seasonality.isSeasonal,
+      peakMonths: seasonality.peakLabels,
       volume,
       cpc,
       competition: metric?.competition ?? null,

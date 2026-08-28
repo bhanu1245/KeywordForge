@@ -22,6 +22,8 @@ import { prisma } from "../db";
 import { enrichKeywordList, discoverKeywords, getProjectKeywords } from "../keywords/service";
 import { generateClustersForProject, getProjectClusters } from "../clusters/service";
 import { analyzeSerps } from "../serp/service";
+import { recordRankSnapshot } from "../rank/service";
+import { evaluateAlerts } from "../alerts/service";
 import { writeCsvExport, writeXlsxExport } from "../export";
 
 export type JobType =
@@ -29,7 +31,8 @@ export type JobType =
   | "discover"
   | "cluster"
   | "export"
-  | "serp_analyze";
+  | "serp_analyze"
+  | "rank_check";
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
 export interface JobContext {
@@ -158,12 +161,46 @@ const handleSerpAnalyze: JobHandler = async (ctx) => {
   return { ...result };
 };
 
+/**
+ * A rank check is: refresh the SERPs, record our positions, then evaluate
+ * alerts against the movement. Chained in one job because each step depends on
+ * the previous one's freshly written data — splitting them would let alerts
+ * fire against positions from the last run.
+ */
+const handleRankCheck: JobHandler = async (ctx) => {
+  if (!ctx.projectId) throw new Error("rank_check requires a projectId");
+  const ownDomain = (ctx.params.ownDomain as string | null) ?? null;
+  if (!ownDomain) {
+    throw new Error("Set a project domain before running a rank check.");
+  }
+
+  const serp = await analyzeSerps({
+    projectId: ctx.projectId,
+    agencyId: ctx.agencyId,
+    keywordIds: ctx.params.keywordIds as string[] | undefined,
+    limit: (ctx.params.limit as number) ?? 25,
+    language: (ctx.params.language as string) ?? "en",
+    location: (ctx.params.location as string) ?? "United States",
+    ownDomain,
+    // A rank check served from the 30-day cache would record the same
+    // position every day regardless of reality.
+    fresh: true,
+    onProgress: (done, total) => ctx.setProgress(done, total),
+  });
+
+  const recorded = await recordRankSnapshot(ctx.projectId, ownDomain);
+  const alerts = await evaluateAlerts(ctx.projectId, ownDomain);
+
+  return { ...serp, recorded, alertsFired: alerts.fired };
+};
+
 const JOB_HANDLERS: Record<JobType, JobHandler> = {
   bulk_enrich: handleBulkEnrich,
   discover: handleDiscover,
   cluster: handleCluster,
   export: handleExport,
   serp_analyze: handleSerpAnalyze,
+  rank_check: handleRankCheck,
 };
 
 // ---------------------------------------------------------------------------
