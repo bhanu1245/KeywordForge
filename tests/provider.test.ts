@@ -93,6 +93,7 @@ describe("buildCsv", () => {
     opportunity: 55,
     trafficPotential: 110,
     commercialValue: 275,
+    revenuePotential: 0,
     trend: null,
     seed: "gold rings",
   };

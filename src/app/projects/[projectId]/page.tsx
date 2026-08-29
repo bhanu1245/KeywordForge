@@ -1,7 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { Workspace } from "@/components/Workspace";
 import { getProjectClusters } from "@/lib/clusters/service";
-import { getProjectKeywords } from "@/lib/keywords/service";
+import { getProjectAssumptions, getProjectKeywords } from "@/lib/keywords/service";
 import { getRawProvider } from "@/lib/providers";
 import { getSerpCoverage } from "@/lib/serp/service";
 import {
@@ -37,10 +37,11 @@ export default async function ProjectPage({
 
   try {
     const project = await assertProjectAccess(agencyId, projectId);
-    const [keywords, clusters, serpCoverage] = await Promise.all([
+    const [keywords, clusters, serpCoverage, assumptions] = await Promise.all([
       getProjectKeywords(project.id),
       getProjectClusters(project.id),
       getSerpCoverage(project.id),
+      getProjectAssumptions(project.id),
     ]);
 
     return (
@@ -55,6 +56,13 @@ export default async function ProjectPage({
         initialKeywords={keywords}
         initialClusters={clusters}
         initialSerpCoverage={serpCoverage}
+        initialAssumptions={{
+          conversionRate: assumptions.conversionRate,
+          orderValue: assumptions.orderValue,
+          position: assumptions.position,
+          configured: assumptions.configured,
+          description: assumptions.description,
+        }}
         // Drives the "billable calls" warning on the SERP panel — it must
         // reflect the provider that actually resolved, not the env var.
         isLiveProvider={getRawProvider().isLive}

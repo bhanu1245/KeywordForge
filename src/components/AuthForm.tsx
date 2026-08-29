@@ -151,8 +151,17 @@ export function AuthForm({
             onChange={(e) => setPassword(e.target.value)}
             className={FIELD}
           />
-          {isSignup && (
+          {isSignup ? (
             <p className="text-[10px] text-subtle">At least 10 characters.</p>
+          ) : (
+            <p className="text-right">
+              <Link
+                href="/forgot"
+                className="rounded text-[10px] text-subtle transition-colors hover:text-brand-soft"
+              >
+                Forgot your password?
+              </Link>
+            </p>
           )}
         </div>
       </div>

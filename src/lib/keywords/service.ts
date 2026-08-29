@@ -10,15 +10,19 @@ import { prisma } from "../db";
 import { getProvider } from "../providers";
 import type { Channel, RawKeyword } from "../providers/types";
 import { classifyIntent, type Intent } from "../seo/intent";
-import type { KeywordFilters, KeywordRow } from "../types";
+import type { KeywordFilters, KeywordRow, ProjectAssumptions } from "../types";
 import { isQuestion } from "../seo/questions";
 import { detectSeasonality, detectTrend } from "../seo/trends";
 import { normalizeText, wordCount } from "../seo/normalize";
 import {
+  DEFAULT_ASSUMPTIONS,
   commercialValue,
+  describeAssumptions,
   keywordDifficulty,
   opportunityScore,
+  revenuePotential,
   trafficPotential,
+  type RevenueAssumptions,
 } from "../seo/scoring";
 
 /**
@@ -290,10 +294,51 @@ export type { KeywordRow, KeywordFilters } from "../types";
  * recomputing costs microseconds and means a weighting change takes effect
  * everywhere instead of leaving stale numbers in old rows.
  */
+/**
+ * Resolves a project's Revenue Potential assumptions.
+ *
+ * Returns `configured: false` when the user has not supplied both figures, so
+ * the UI can prompt instead of presenting revenue modelled on placeholder
+ * numbers nobody chose.
+ */
+export async function getProjectAssumptions(
+  projectId: string,
+): Promise<ProjectAssumptions & { resolved: RevenueAssumptions }> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: {
+      assumedConversionRate: true,
+      assumedOrderValue: true,
+      assumedPosition: true,
+    },
+  });
+
+  const conversionRate = project?.assumedConversionRate ?? null;
+  const orderValue = project?.assumedOrderValue ?? null;
+  const position = project?.assumedPosition ?? DEFAULT_ASSUMPTIONS.position;
+  const configured = conversionRate !== null && orderValue !== null && orderValue > 0;
+
+  const resolved: RevenueAssumptions = {
+    conversionRate: conversionRate ?? DEFAULT_ASSUMPTIONS.conversionRate,
+    orderValue: orderValue ?? DEFAULT_ASSUMPTIONS.orderValue,
+    position,
+  };
+
+  return {
+    conversionRate,
+    orderValue,
+    position,
+    configured,
+    description: describeAssumptions(resolved),
+    resolved,
+  };
+}
+
 export async function getProjectKeywords(
   projectId: string,
   filters: KeywordFilters = {},
 ): Promise<KeywordRow[]> {
+  const assumptions = await getProjectAssumptions(projectId);
   const links = await prisma.projectKeyword.findMany({
     where: {
       projectId,
@@ -374,8 +419,13 @@ export async function getProjectKeywords(
       isQuestion: kw.isQuestion,
       intentConfidence: kw.intentConfidence,
       opportunity: opportunityScore({ volume, difficulty, intent }),
-      trafficPotential: trafficPotential(volume),
-      commercialValue: commercialValue(volume, cpc),
+      trafficPotential: trafficPotential(volume, assumptions.position),
+      commercialValue: commercialValue(volume, cpc, assumptions.position),
+      // Zero until the project supplies real assumptions — never a modelled
+      // figure built on placeholder defaults.
+      revenuePotential: assumptions.configured
+        ? revenuePotential(volume, assumptions.resolved)
+        : 0,
       trend,
       seed: link.seed,
     });

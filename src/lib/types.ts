@@ -26,6 +26,8 @@ export interface KeywordRow {
   opportunity: number;
   trafficPotential: number;
   commercialValue: number;
+  /** Modelled monthly revenue. 0 when the project has no assumptions set. */
+  revenuePotential: number;
   trend: number[] | null;
   seed: string | null;
   /** Search surface these metrics describe. */
@@ -58,6 +60,19 @@ export interface KeywordSummary {
   avgDifficulty: number;
   totalValue: number;
   questions: number;
+  totalRevenue: number;
+}
+
+/** Revenue Potential inputs, surfaced so the UI can always show them. */
+export interface ProjectAssumptions {
+  /** Null = never set. The UI prompts rather than modelling on a guess. */
+  conversionRate: number | null;
+  orderValue: number | null;
+  position: number;
+  /** True once the user has supplied both figures. */
+  configured: boolean;
+  /** Plain-English restatement, rendered next to every revenue figure. */
+  description: string;
 }
 
 export interface ClusterKeywordView {

@@ -115,6 +115,24 @@ This shapes the **mock provider only**. With a live provider the real API return
 
 ---
 
+### Phase 4 — partial (3 of 7 modules)
+
+Scoped to what is buildable without a licensed data index or a pricing decision.
+
+| # | Module | Where |
+|---|---|---|
+| 32 | Historical Data | `src/lib/history/service.ts`, `GET /api/v1/history` |
+| 33 | Revenue Potential | `revenuePotential()` in `src/lib/seo/scoring.ts` |
+| 36 | Agency Mode | `src/lib/agency/service.ts`, `/agency`, `/reports/[projectId]` |
+
+**Revenue Potential is a third-order estimate and is labelled as one.** `volume × CTR(position) × conversionRate × orderValue` — every term is an assumption: volume is the provider's modelled figure, CTR is a generic industry curve that ignores SERP features and brand pull, and the conversion rate and order value are the user's own inputs which the model cannot check. The assumptions banner renders above every figure, and until a project supplies real numbers the panel shows a prompt rather than revenue computed from placeholder defaults. The client-facing report repeats the caveat inline.
+
+**Historical Data is a read, not new collection.** `keyword_metrics` has accrued since Phase 1, `serp_snapshots` since Phase 2, `rank_tracking_entries` since Phase 3 — PRD §6's "you cannot buy someone else's history" is why the accrual came first. A new project has one reading, so the panel counts the days on record and says *"history builds over time as you track this project"* instead of drawing a one-point chart that reads as broken. Readings are collapsed per day (a re-run and a rank check on the same day are one point) and the project roll-up takes each keyword's latest reading before aggregating, so a keyword measured twice in a day is not double-counted.
+
+**Agency Mode reuses the `Agency.branding` JSON** that has existed since Phase 1 (`{ primaryColor, logoUrl }`) — the shape is extended, not replaced. Branding is re-validated on **read** as well as write, because rows predating validation must not be able to inject into the report's `style` attribute. The client report is a print-optimised HTML page rather than a generated PDF: the browser already exports PDF, and a PDF library would be weight for no gain.
+
+**Not touched, and why:** Backlinks (30) and Domain Authority (31) need a licensed index; the public API (34) and 100K–1M bulk (35) need a pricing model first — rank tracking now makes uncached live SERP calls, which is a real per-use cost that has to be priced before it is exposed.
+
 ## Authentication
 
 Email + password, with server-side sessions. No auth library.
@@ -132,6 +150,10 @@ Email + password, with server-side sessions. No auth library.
 | Signup | Creates a **new agency**, signer-up is owner |
 | Joining an agency | Owner-issued one-time invite link, hashed, single-use, 7-day expiry |
 | Dev fast path | `DEV_AUTO_LOGIN_EMAIL` resolves a **named seeded user**; ignored when `NODE_ENV=production` |
+| Password reset | One-time hashed token, 1-hour expiry, revokes all sessions on use |
+| Rate limiting | 5 failed logins / 15 min per email **and** per IP, in-process only |
+
+**Password reset has no email transport.** `deliverResetLink` in `src/lib/auth/passwordReset.ts` is the seam a provider plugs into; with none configured the link is logged to the server console in development, and an owner can generate a reset link for any member from `/agency` — which is what unblocks users migrated in with `passwordHash = NULL`. **A production deployment must implement the transport** before self-service reset works for anyone who cannot read the server log. One dev-only wrinkle: the `devLink` field is present for a known address and absent for an unknown one, so development responses are distinguishable; in production `devLink` is never populated and the responses are identical.
 
 Two deliberate details: login returns the same message and roughly the same timing for "no such user" and "wrong password" (a dummy bcrypt comparison burns the time when no hash exists), and `passwordHash` is nullable so a future OAuth user can exist without one — treated as *cannot* authenticate, never as *no password required*.
 

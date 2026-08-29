@@ -68,9 +68,10 @@ model User {
   lastLoginAt  DateTime?
   createdAt DateTime @default(now())
 
-  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
-  sessions Session[]
-  invites  Invite[]
+  agency      Agency               @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  sessions    Session[]
+  invites     Invite[]
+  resetTokens PasswordResetToken[]
 
   @@index([agencyId])
   @@map("users")
@@ -103,6 +104,25 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@map("sessions")
+}
+
+// Password reset tokens.
+//
+// Same storage rule as sessions and invites: only the SHA-256 is kept, the
+// link is shown/sent once, single-use, short-lived. Short TTL because unlike
+// an invite this grants control of an EXISTING account.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }
 
 // One-time invite links (PRD §7 module 36 groundwork).
@@ -153,6 +173,18 @@ model Project {
   // Default market for lookups in this project.
   language  String   @default("en")
   location  String   @default("United States")
+
+  // Revenue Potential assumptions (PRD §7 module 33).
+  //
+  // Stored PER PROJECT because they are business facts about one client, not
+  // global truths — a jeweller's average order value has nothing to do with a
+  // dentist's. Nullable so the UI can tell "never set" apart from "set to
+  // zero" and prompt rather than silently modelling revenue on a default
+  // nobody chose.
+  assumedConversionRate Float? // e.g. 0.02 = 2% of sessions convert
+  assumedOrderValue     Float? // average revenue per conversion, in CPC currency
+  // Which SERP position the estimate assumes you reach.
+  assumedPosition       Int?   @default(3)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

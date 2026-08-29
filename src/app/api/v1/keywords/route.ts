@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { handleError, ok, parseQuery } from "@/lib/api";
-import { getProjectKeywords, type KeywordFilters } from "@/lib/keywords/service";
+import {
+  getProjectAssumptions,
+  getProjectKeywords,
+  type KeywordFilters,
+} from "@/lib/keywords/service";
 import { INTENTS } from "@/lib/seo/intent";
 import { CHANNELS } from "@/lib/providers/types";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
@@ -69,8 +73,19 @@ export async function GET(request: Request) {
             (keywords.reduce((n, k) => n + k.difficulty, 0) / keywords.length).toFixed(1),
           );
 
+    // Assumptions travel with the payload so the UI can never render a
+    // revenue figure without the caveats attached to it.
+    const assumptions = await getProjectAssumptions(project.id);
+
     return ok({
       keywords,
+      assumptions: {
+        conversionRate: assumptions.conversionRate,
+        orderValue: assumptions.orderValue,
+        position: assumptions.position,
+        configured: assumptions.configured,
+        description: assumptions.description,
+      },
       summary: {
         count: keywords.length,
         totalVolume,
@@ -79,6 +94,9 @@ export async function GET(request: Request) {
           keywords.reduce((n, k) => n + k.commercialValue, 0).toFixed(2),
         ),
         questions: keywords.filter((k) => k.isQuestion).length,
+        totalRevenue: Number(
+          keywords.reduce((n, k) => n + k.revenuePotential, 0).toFixed(2),
+        ),
       },
     });
   } catch (error) {

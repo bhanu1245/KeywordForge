@@ -12,12 +12,15 @@ import type {
 import { isLongTail, isQuestion } from "@/lib/seo/questions";
 import { normalizeText } from "@/lib/seo/normalize";
 import type { SerpCoverageView } from "@/lib/types";
+import type { ProjectAssumptions } from "@/lib/types";
 import { ChannelPanel } from "./ChannelPanel";
 import { ClusterPanel } from "./ClusterPanel";
 import { CompetitorPanel } from "./CompetitorPanel";
 import { FilterBar } from "./FilterBar";
+import { HistoryPanel } from "./HistoryPanel";
 import { Icon } from "./Icon";
 import { ImportPanel } from "./ImportPanel";
+import { RevenuePanel } from "./RevenuePanel";
 import { KeywordTable } from "./KeywordTable";
 import { RankPanel } from "./RankPanel";
 import { SeedGenerator } from "./SeedGenerator";
@@ -35,6 +38,8 @@ type Tab =
   | "rank"
   | "channels"
   | "trends"
+  | "revenue"
+  | "history"
   | "import";
 
 export interface WorkspaceProject {
@@ -56,18 +61,21 @@ export function Workspace({
   initialKeywords,
   initialClusters,
   initialSerpCoverage,
+  initialAssumptions,
   isLiveProvider,
 }: {
   project: WorkspaceProject;
   initialKeywords: KeywordRow[];
   initialClusters: ClusterView[];
   initialSerpCoverage: SerpCoverageView | null;
+  initialAssumptions: ProjectAssumptions;
   isLiveProvider: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("explorer");
   const [keywords, setKeywords] = useState<KeywordRow[]>(initialKeywords);
   const [clusters, setClusters] = useState<ClusterView[]>(initialClusters);
   const [serpCoverage, setSerpCoverage] = useState<SerpCoverageView | null>(initialSerpCoverage);
+  const [assumptions, setAssumptions] = useState<ProjectAssumptions>(initialAssumptions);
   const [filters, setFilters] = useState<KeywordFilters>({});
   const [seed, setSeed] = useState("");
   const [showGenerator, setShowGenerator] = useState(false);
@@ -80,7 +88,13 @@ export function Workspace({
       fetch(`/api/v1/clusters?projectId=${project.id}`),
       fetch(`/api/v1/serp?projectId=${project.id}`),
     ]);
-    if (kwRes.ok) setKeywords((await kwRes.json()).keywords as KeywordRow[]);
+    if (kwRes.ok) {
+      const json = await kwRes.json();
+      setKeywords(json.keywords as KeywordRow[]);
+      // Assumptions come back with the keywords so revenue figures and their
+      // caveats can never drift apart.
+      if (json.assumptions) setAssumptions(json.assumptions as ProjectAssumptions);
+    }
     if (clRes.ok) setClusters((await clRes.json()).clusters as ClusterView[]);
     if (serpRes.ok) setSerpCoverage((await serpRes.json()) as SerpCoverageView);
   }, [project.id]);
@@ -220,6 +234,8 @@ export function Workspace({
     ["rank", "Rank", "arrowUp", null],
     ["channels", "Channels", "search", null],
     ["trends", "Trends", "arrowUp", risingCount],
+    ["revenue", "Revenue", "target", null],
+    ["history", "History", "table", null],
     ["import", "Import", "upload", null],
   ];
 
@@ -339,6 +355,13 @@ export function Workspace({
           <Button variant="outline" icon="download" onClick={() => exportTo("xlsx")} disabled={busy !== null || isEmpty}>
             Excel
           </Button>
+          <Link
+            href={`/reports/${project.id}`}
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line-strong px-2.5 py-1.5 text-xs font-medium text-ink transition-colors hover:border-brand-soft hover:bg-elevated"
+          >
+            <Icon name="external" size={14} />
+            Report
+          </Link>
         </div>
       </div>
 
@@ -411,6 +434,18 @@ export function Workspace({
         {tab === "channels" && <ChannelPanel projectId={project.id} />}
 
         {tab === "trends" && <TrendsPanel keywords={keywords} />}
+
+        {tab === "revenue" && (
+          <RevenuePanel
+            projectId={project.id}
+            keywords={keywords}
+            clusters={clusters}
+            assumptions={assumptions}
+            onSaved={() => void reload()}
+          />
+        )}
+
+        {tab === "history" && <HistoryPanel projectId={project.id} />}
 
         {tab === "import" && (
           <ImportPanel

@@ -35,7 +35,11 @@ export function middleware(request: NextRequest) {
 export const config = {
   /**
    * Everything except: API routes (they return 401 JSON), the auth pages
-   * themselves (redirecting those would loop), and Next's static assets.
+   * themselves (redirecting those would loop — including the password-reset
+   * pages, which by definition are reached while signed out), and Next's
+   * static assets.
    */
-  matcher: ["/((?!api|login|signup|_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!api|login|signup|forgot|reset|_next/static|_next/image|favicon.ico).*)",
+  ],
 };

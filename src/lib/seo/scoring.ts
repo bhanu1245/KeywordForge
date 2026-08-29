@@ -119,6 +119,78 @@ export function commercialValue(
   return Number((trafficPotential(volume, position) * cpc).toFixed(2));
 }
 
+/* -------------------------------------------------------------------------
+ * Revenue Potential (PRD §7 module 33)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Assumptions behind a revenue estimate. Carried WITH the number everywhere it
+ * is displayed, because the figure is meaningless without them.
+ */
+export interface RevenueAssumptions {
+  /** 0..1. Share of sessions that become a conversion. */
+  conversionRate: number;
+  /** Average revenue per conversion, in the CPC's currency. */
+  orderValue: number;
+  /** SERP position the estimate assumes you reach. */
+  position: number;
+}
+
+/** Placeholder defaults — deliberately round numbers, meant to be replaced. */
+export const DEFAULT_ASSUMPTIONS: RevenueAssumptions = {
+  conversionRate: 0.02,
+  orderValue: 100,
+  position: 3,
+};
+
+/**
+ * Estimated monthly revenue from ranking for a keyword.
+ *
+ * HONESTY NOTE — the same caveat as keywordDifficulty, and it matters more
+ * here because this number looks like money:
+ *
+ *   revenue = volume x CTR(position) x conversionRate x orderValue
+ *
+ * Every one of those four terms is an estimate or an assumption:
+ *   - volume is a provider's modelled figure, not a measurement;
+ *   - CTR comes from a generic industry curve (ctrForPosition) that ignores
+ *     SERP features, brand pull and intent;
+ *   - conversionRate and orderValue are values the USER supplied about their
+ *     own business — the model has no way to check them.
+ *
+ * So this is a THIRD-order estimate: an assumption multiplied by an
+ * assumption. It is genuinely useful for ranking keywords against each other
+ * and for sizing a content bet, and it is not a forecast. The UI states the
+ * assumptions next to the number and never renders it without them.
+ */
+export function revenuePotential(
+  volume: number | null | undefined,
+  assumptions: RevenueAssumptions,
+): number {
+  if (!volume || volume <= 0) return 0;
+  const { conversionRate, orderValue, position } = assumptions;
+  if (conversionRate <= 0 || orderValue <= 0) return 0;
+
+  const sessions = trafficPotential(volume, position);
+  return Number((sessions * conversionRate * orderValue).toFixed(2));
+}
+
+/**
+ * Human-readable statement of what the number assumed. Rendered verbatim in
+ * the UI so the assumptions travel with the figure rather than living in a
+ * settings screen nobody revisits.
+ */
+export function describeAssumptions(a: RevenueAssumptions): string {
+  const ctr = Math.round(ctrForPosition(a.position) * 1000) / 10;
+  return `Assumes position ${a.position} (~${ctr}% CTR), ${(a.conversionRate * 100).toFixed(
+    1,
+  )}% conversion, ${a.orderValue.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  })} average order value.`;
+}
+
 export interface OpportunityInput {
   volume?: number | null;
   difficulty: number;
