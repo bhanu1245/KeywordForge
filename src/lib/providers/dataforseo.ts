@@ -23,11 +23,19 @@ import type {
   SerpResultItem,
 } from "./types";
 
+/**
+ * DataForSEO groups status codes into families: 20000-29999 success,
+ * 40000-49999 client/task errors, 50000+ server errors. Anything at or above
+ * 40000 is a failure at either envelope or task level.
+ */
+const DFS_ERROR_THRESHOLD = 40000;
+
 const COST_PER_IDEAS_CALL = 0.01;
 const COST_PER_VOLUME_KEYWORD = 0.00005;
 const COST_PER_SERP_CALL = 0.002;
 
 interface DfsEnvelope {
+  /** Envelope-level status. Present even when `tasks` is absent entirely. */
   status_code?: number;
   status_message?: string;
   tasks?: Array<{
@@ -73,13 +81,33 @@ export class DataForSeoProvider implements KeywordDataProvider {
     }
 
     const json = (await res.json()) as DfsEnvelope;
-    // 20000 is DataForSEO's "ok" family; anything else is a real failure.
+
+    /**
+     * TOP-LEVEL status first, BEFORE touching `tasks`.
+     *
+     * DataForSEO signals most failures with HTTP 200 and an error code in the
+     * body. Crucially, an envelope-level failure — a bad login (40100), an
+     * unpaid balance (40200) — carries NO `tasks` array at all. Checking only
+     * `tasks[0].status_code` meant `task` was `undefined`, nothing threw, and
+     * the parsers downstream mapped an absent array to `[]`. A wrong password
+     * therefore looked exactly like "this keyword has no ideas", which is the
+     * worst possible way for an auth failure to present.
+     */
+    if (typeof json.status_code === "number" && json.status_code >= DFS_ERROR_THRESHOLD) {
+      throw new Error(
+        `DataForSEO ${path} error ${json.status_code}: ${json.status_message ?? "unknown"}`,
+      );
+    }
+
+    // Then the per-task status: the envelope can succeed while the one task
+    // inside it fails.
     const task = json.tasks?.[0];
-    if (task?.status_code && task.status_code >= 40000) {
+    if (typeof task?.status_code === "number" && task.status_code >= DFS_ERROR_THRESHOLD) {
       throw new Error(
         `DataForSEO ${path} task error ${task.status_code}: ${task.status_message ?? "unknown"}`,
       );
     }
+
     return json;
   }
 

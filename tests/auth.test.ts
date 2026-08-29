@@ -47,9 +47,14 @@ const { prisma } = await import("../src/lib/db.ts");
 const { hashPassword, verifyPassword, MIN_PASSWORD_LENGTH, activeCost } = await import(
   "../src/lib/auth/password.ts"
 );
-const { createSessionRecord, resolveSessionToken, hashToken, safeEqualHex } = await import(
-  "../src/lib/auth/session.ts"
-);
+const {
+  createSessionRecord,
+  resolveSessionToken,
+  hashToken,
+  safeEqualHex,
+  pruneExpiredSessions,
+  maybePruneExpiredSessions,
+} = await import("../src/lib/auth/session.ts");
 const { checkLimit, recordFailure, resetAllLimits, emailKey, ipKey } = await import(
   "../src/lib/auth/rateLimit.ts"
 );
@@ -244,6 +249,75 @@ describe("session tokens", () => {
       assert.ok(!seen.has(token));
       seen.add(token);
     }
+  });
+});
+
+describe("expired session pruning", () => {
+  it("deletes expired rows and leaves valid ones alone", async () => {
+    const stale = await createSessionRecord(userA.id);
+    const live = await createSessionRecord(userA.id);
+    await prisma.session.update({
+      where: { tokenHash: hashToken(stale.token) },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    const removed = await pruneExpiredSessions();
+    assert.ok(removed >= 1, "should have deleted at least the stale row");
+    assert.equal(
+      await prisma.session.findUnique({ where: { tokenHash: hashToken(stale.token) } }),
+      null,
+    );
+    assert.ok(
+      await prisma.session.findUnique({ where: { tokenHash: hashToken(live.token) } }),
+      "a valid session must survive the sweep",
+    );
+  });
+
+  /** The roll is injectable so this does not depend on chance. */
+  it("sweeps only when the roll falls under the probability", async () => {
+    const stale = await createSessionRecord(userA.id);
+    await prisma.session.update({
+      where: { tokenHash: hashToken(stale.token) },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    // A high roll must do nothing at all.
+    assert.equal(await maybePruneExpiredSessions(0.99), null);
+    assert.ok(
+      await prisma.session.findUnique({ where: { tokenHash: hashToken(stale.token) } }),
+      "a losing roll must not sweep",
+    );
+
+    // A low roll sweeps.
+    const removed = await maybePruneExpiredSessions(0);
+    assert.ok(typeof removed === "number" && removed >= 1);
+    assert.equal(
+      await prisma.session.findUnique({ where: { tokenHash: hashToken(stale.token) } }),
+      null,
+    );
+  });
+
+  it("is wired into session creation, not the read path", () => {
+    const source = codeOf("src/lib/auth/session.ts");
+    assert.match(
+      source,
+      /void maybePruneExpiredSessions\(\);/,
+      "createSessionRecord should sweep opportunistically",
+    );
+    // The hot read path must stay free of write contention. Bound the slice to
+    // resolveSessionToken's own body — running to end-of-file would swallow
+    // the pruning helpers' own definitions, which appear later.
+    const start = source.indexOf("export async function resolveSessionToken");
+    const next = source.indexOf("\nexport ", start + 1);
+    const readPath = source.slice(start, next === -1 ? undefined : next);
+    assert.ok(
+      readPath.includes("prisma.session"),
+      "sanity: the slice should contain the lookup",
+    );
+    assert.ok(
+      !/maybePruneExpiredSessions/.test(readPath),
+      "pruning must not run on every authenticated request",
+    );
   });
 });
 

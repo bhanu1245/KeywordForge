@@ -82,6 +82,10 @@ export async function createSessionRecord(
     data: { userId, tokenHash: hashToken(token), expiresAt, userAgent: userAgent ?? null },
   });
 
+  // Opportunistic housekeeping, fire-and-forget: a slow or failing sweep must
+  // never delay or break the login that triggered it.
+  void maybePruneExpiredSessions();
+
   return { token, expiresAt };
 }
 
@@ -186,4 +190,31 @@ export async function pruneExpiredSessions(): Promise<number> {
     where: { expiresAt: { lte: new Date() } },
   });
   return count;
+}
+
+/**
+ * Roughly 1 in 20 calls actually sweeps.
+ *
+ * WHY SESSION CREATION AND NOT THE READ PATH: expired rows accumulate in
+ * proportion to how many sessions get CREATED, not how many requests are
+ * served, so pruning here scales with the thing that causes the problem. The
+ * read path (`resolveSessionToken`) runs on every authenticated request, and
+ * putting even a 1-in-N `deleteMany` there would add write contention to the
+ * hottest query in the app for no extra benefit.
+ *
+ * Login is also already the slowest endpoint — bcrypt costs ~250ms — so an
+ * occasional indexed delete is invisible next to it.
+ *
+ * This is NOT a substitute for a scheduled job; it is the cheap safe thing
+ * until the scheduler decision is made (see the deployment notes).
+ */
+const PRUNE_PROBABILITY = 0.05;
+
+export async function maybePruneExpiredSessions(
+  /** Injectable so the behaviour is testable without relying on chance. */
+  roll: number = Math.random(),
+): Promise<number | null> {
+  if (roll >= PRUNE_PROBABILITY) return null;
+  // Never let housekeeping fail the request that triggered it.
+  return pruneExpiredSessions().catch(() => null);
 }
