@@ -30,8 +30,25 @@ import type {
  */
 const DFS_ERROR_THRESHOLD = 40000;
 
-const COST_PER_IDEAS_CALL = 0.01;
-const COST_PER_VOLUME_KEYWORD = 0.00005;
+/**
+ * Costs OBSERVED on live calls, not guessed.
+ *
+ *   keyword_ideas (limit 5)      cost 0.0126
+ *   search_volume (2 keywords)   cost 0.0900
+ *
+ * The search_volume figure is the important correction: it was modelled as
+ * $0.00005 PER KEYWORD, which for that 2-keyword call predicted $0.0001
+ * against an actual $0.09 — understating spend by ~900x. Google Ads volume is
+ * billed per TASK, not per keyword, so the ledger was wildly optimistic.
+ *
+ * CAVEAT: each figure is a single observation. keyword_ideas may scale with
+ * `limit`, and search_volume may have a per-keyword component above some
+ * batch size — one 2-keyword call cannot distinguish a flat fee from a small
+ * per-keyword one. Treat these as order-of-magnitude, and re-measure against
+ * your own plan before quoting margins.
+ */
+const COST_PER_IDEAS_CALL = 0.0126;
+const COST_PER_VOLUME_CALL = 0.09;
 const COST_PER_SERP_CALL = 0.002;
 
 /**
@@ -147,7 +164,47 @@ export class DataForSeoProvider implements KeywordDataProvider {
       .map((v) => Number((v / mean).toFixed(3)));
   }
 
+  /** Verbal competition levels, used only when no numeric field is present. */
+  private static readonly COMPETITION_LEVELS: Record<string, number> = {
+    LOW: 0.15,
+    MEDIUM: 0.5,
+    HIGH: 0.85,
+    UNSPECIFIED: 0,
+  };
+
+  /**
+   * Normalises competition to 0..1, which is what our difficulty scoring
+   * expects. The two endpoints disagree, verified against live responses:
+   *
+   *   keyword_ideas   "competition": 0.02        number, already 0..1
+   *   search_volume   "competition": "HIGH"      STRING
+   *                   "competition_index": 100   number, 0..100
+   *
+   * Reading `competition` as a number worked for keyword_ideas and returned
+   * null for every search_volume row — so the whole bulk-import path lost its
+   * competition signal silently, and difficulty quietly fell back to its
+   * weaker volume-and-length weighting. Preference order is
+   * numeric > index > verbal, because the verbal buckets are the coarsest.
+   */
+  private static competition(info: Record<string, unknown>): number | null {
+    const direct = DataForSeoProvider.num(info.competition);
+    if (direct !== null) return Math.min(Math.max(direct, 0), 1);
+
+    const index = DataForSeoProvider.num(info.competition_index);
+    if (index !== null) return Math.min(Math.max(index / 100, 0), 1);
+
+    const verbal = info.competition ?? info.competition_level;
+    if (typeof verbal === "string") {
+      const mapped = DataForSeoProvider.COMPETITION_LEVELS[verbal.toUpperCase()];
+      return mapped === undefined ? null : mapped;
+    }
+
+    return null;
+  }
+
   private static toRawKeyword(item: Record<string, unknown>): RawKeyword | null {
+    // keyword_ideas nests metrics under keyword_info; google_ads/search_volume
+    // returns them flat on the item. Both shapes verified live.
     const info = (item.keyword_info ?? item) as Record<string, unknown>;
     const text = typeof item.keyword === "string" ? item.keyword : null;
     if (!text) return null;
@@ -155,7 +212,7 @@ export class DataForSeoProvider implements KeywordDataProvider {
       text: normalizeText(text),
       volume: DataForSeoProvider.num(info.search_volume),
       cpc: DataForSeoProvider.num(info.cpc),
-      competition: DataForSeoProvider.num(info.competition),
+      competition: DataForSeoProvider.competition(info),
       trend: DataForSeoProvider.toTrend(info.monthly_searches),
     };
   }
@@ -228,7 +285,10 @@ export class DataForSeoProvider implements KeywordDataProvider {
     return {
       data,
       unitsConsumed: batch.length,
-      costUsd: Number((batch.length * COST_PER_VOLUME_KEYWORD).toFixed(6)),
+      // Billed per task, not per keyword — see the note on COST_PER_VOLUME_CALL.
+      // `unitsConsumed` still counts keywords, since that is what the ledger
+      // reports as work done; only the money is per call.
+      costUsd: COST_PER_VOLUME_CALL,
     };
   }
 

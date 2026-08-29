@@ -143,25 +143,47 @@ describe("DataForSEO envelope errors", () => {
 });
 
 describe("DataForSEO response parsing", () => {
-  /** keyword_ideas nests metrics under keyword_info. */
-  it("reads metrics from the nested keyword_info shape", async () => {
+  /**
+   * VERBATIM item from a live keyword_ideas response. Metrics are nested under
+   * `keyword_info` and `competition` is a NUMBER already on a 0..1 scale.
+   */
+  it("reads the REAL nested keyword_info shape from keyword_ideas", async () => {
     stubFetch({
+      version: "0.1.20260826",
       status_code: 20000,
+      status_message: "Ok.",
+      cost: 0.0126,
       tasks: [
         {
           status_code: 20000,
+          status_message: "Ok.",
           result: [
             {
+              se_type: "google",
+              seed_keywords: ["stainless steel dog bowl holder"],
+              location_code: 2840,
+              language_code: "en",
+              total_count: 204416,
+              items_count: 1,
               items: [
                 {
-                  keyword: "Gold Rings",
+                  se_type: "google",
+                  keyword: "cotton bowl",
+                  location_code: 2840,
+                  language_code: "en",
                   keyword_info: {
-                    search_volume: 12100,
-                    cpc: 1.42,
-                    competition: 0.33,
+                    se_type: "google",
+                    last_updated_time: "2026-08-28 16:12:30 +00:00",
+                    competition: 0.02,
+                    competition_level: "LOW",
+                    cpc: 1.63,
+                    search_volume: 301000,
+                    low_top_of_page_bid: 0.57,
+                    high_top_of_page_bid: 2.93,
+                    categories: [10005, 10060, 10354],
                     monthly_searches: [
-                      { year: 2026, month: 8, search_volume: 12100 },
-                      { year: 2026, month: 7, search_volume: 9900 },
+                      { year: 2026, month: 7, search_volume: 12100 },
+                      { year: 2026, month: 6, search_volume: 9900 },
                     ],
                   },
                 },
@@ -172,37 +194,99 @@ describe("DataForSEO response parsing", () => {
       ],
     });
 
-    const { data } = await provider().keywordIdeas({ ...market, seed: "gold rings", limit: 10 });
+    const { data } = await provider().keywordIdeas({ ...market, seed: "dog bowl", limit: 5 });
     assert.equal(data.length, 1);
-    assert.equal(data[0].text, "gold rings"); // normalised
-    assert.equal(data[0].volume, 12100);
-    assert.equal(data[0].cpc, 1.42);
-    assert.equal(data[0].competition, 0.33);
-    assert.ok(data[0].trend && data[0].trend.length === 2);
+    assert.equal(data[0].text, "cotton bowl");
+    assert.equal(data[0].volume, 301000);
+    assert.equal(data[0].cpc, 1.63);
+    assert.equal(data[0].competition, 0.02, "numeric competition is already 0..1");
+    assert.equal(data[0].trend?.length, 2);
   });
 
   /**
-   * google_ads/search_volume returns the metrics FLAT on the item, with no
-   * keyword_info wrapper — the `item.keyword_info ?? item` fallback.
+   * VERBATIM item from a live google_ads/search_volume response.
+   *
+   * Two things this pins, both of which broke the original parser:
+   *   - metrics are FLAT on the result item (no keyword_info wrapper), which
+   *     is what the `item.keyword_info ?? item` fallback exists for;
+   *   - `competition` is the STRING "HIGH", with the number in
+   *     `competition_index` on a 0..100 scale.
    */
-  it("reads metrics from the flat shape via the keyword_info fallback", async () => {
+  it("reads the REAL flat shape from search_volume, including string competition", async () => {
     stubFetch({
+      version: "0.1.20260826",
       status_code: 20000,
+      status_message: "Ok.",
+      cost: 0.09,
       tasks: [
         {
           status_code: 20000,
+          status_message: "Ok.",
+          result_count: 1,
           result: [
-            { keyword: "silver necklace", search_volume: 4400, cpc: 0.88, competition: 0.51 },
+            {
+              keyword: "stainless steel dog bowl holder",
+              spell: null,
+              location_code: 2840,
+              language_code: "en",
+              search_partners: false,
+              competition: "HIGH",
+              competition_index: 100,
+              search_volume: 20,
+              low_top_of_page_bid: null,
+              high_top_of_page_bid: null,
+              cpc: 1.39,
+              monthly_searches: [
+                { year: 2026, month: 7, search_volume: 10 },
+                { year: 2026, month: 6, search_volume: 10 },
+              ],
+            },
           ],
         },
       ],
     });
 
-    const { data } = await provider().searchVolume({ ...market, keywords: ["silver necklace"] });
+    const { data } = await provider().searchVolume({
+      ...market,
+      keywords: ["stainless steel dog bowl holder"],
+    });
     assert.equal(data.length, 1);
-    assert.equal(data[0].volume, 4400);
-    assert.equal(data[0].cpc, 0.88);
-    assert.equal(data[0].competition, 0.51);
+    assert.equal(data[0].volume, 20);
+    assert.equal(data[0].cpc, 1.39);
+    // Was null before the fix — competition_index/100, not the string.
+    assert.equal(data[0].competition, 1, "competition_index 100 must normalise to 1.0");
+    assert.equal(data[0].trend?.length, 2);
+  });
+
+  it("falls back to the verbal level when no numeric competition exists", async () => {
+    stubFetch({
+      status_code: 20000,
+      tasks: [
+        {
+          status_code: 20000,
+          result: [{ keyword: "some keyword", search_volume: 100, competition: "LOW" }],
+        },
+      ],
+    });
+    const { data } = await provider().searchVolume({ ...market, keywords: ["some keyword"] });
+    assert.ok(
+      data[0].competition !== null && data[0].competition > 0 && data[0].competition < 0.5,
+      `LOW should map into the low band, got ${data[0].competition}`,
+    );
+  });
+
+  it("clamps competition into 0..1", async () => {
+    stubFetch({
+      status_code: 20000,
+      tasks: [
+        {
+          status_code: 20000,
+          result: [{ keyword: "weird", search_volume: 10, competition_index: 250 }],
+        },
+      ],
+    });
+    const { data } = await provider().searchVolume({ ...market, keywords: ["weird"] });
+    assert.equal(data[0].competition, 1);
   });
 
   it("survives nulls and missing fields without throwing", async () => {
