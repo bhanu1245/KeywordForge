@@ -36,15 +36,61 @@ describe("DataForSEO envelope errors", () => {
    * tasks[0].status_code let it fall through and parse as zero results — so a
    * wrong password looked exactly like "this keyword has no ideas".
    */
-  it("throws on a top-level error with NO tasks array at all", async () => {
-    stubFetch({ status_code: 40100, status_message: "Unauthorized." });
+  /**
+   * VERBATIM body from a real DataForSEO auth failure, captured live.
+   *
+   * Two things here differ from what the code originally assumed, which is
+   * exactly why this was worth observing rather than imagining:
+   *   - the HTTP status is 401, not 200;
+   *   - `tasks` is explicitly `null`, not absent and not `[]`.
+   * `cost: 0` on the same response is how we know a rejected request is free.
+   */
+  const REAL_AUTH_FAILURE = {
+    version: "0.1.20260826",
+    status_code: 40100,
+    status_message:
+      "You are not authorized to access this resource. See your login details here: https://app.dataforseo.com/api-access .",
+    time: "0 sec.",
+    cost: 0,
+    tasks_count: 0,
+    tasks_error: 0,
+    tasks: null,
+  };
+
+  it("throws on the REAL auth-failure envelope (HTTP 401, tasks: null)", async () => {
+    stubFetch(REAL_AUTH_FAILURE, 401);
+    await assert.rejects(
+      () => provider().keywordIdeas({ ...market, seed: "gold rings", limit: 10 }),
+      (error: unknown) => {
+        assert.match(String(error), /401/);
+        return true;
+      },
+    );
+  });
+
+  /**
+   * The same body served with HTTP 200 — which some DataForSEO error families
+   * do. Here `!res.ok` does not fire, so the top-level status_code check is
+   * the only thing standing between an auth failure and it parsing as
+   * "zero results".
+   */
+  it("throws on the real error body even when served with HTTP 200", async () => {
+    stubFetch(REAL_AUTH_FAILURE, 200);
     await assert.rejects(
       () => provider().keywordIdeas({ ...market, seed: "gold rings", limit: 10 }),
       (error: unknown) => {
         assert.match(String(error), /40100/);
-        assert.match(String(error), /Unauthorized/);
+        assert.match(String(error), /not authorized/i);
         return true;
       },
+    );
+  });
+
+  it("throws on a top-level error with NO tasks key at all", async () => {
+    stubFetch({ status_code: 40100, status_message: "Unauthorized." });
+    await assert.rejects(
+      () => provider().keywordIdeas({ ...market, seed: "gold rings", limit: 10 }),
+      /40100/,
     );
   });
 

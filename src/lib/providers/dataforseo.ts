@@ -34,15 +34,29 @@ const COST_PER_IDEAS_CALL = 0.01;
 const COST_PER_VOLUME_KEYWORD = 0.00005;
 const COST_PER_SERP_CALL = 0.002;
 
+/**
+ * Envelope shape, confirmed against a real response.
+ *
+ * A live auth failure returns HTTP 401 with this body — note `tasks` is
+ * explicitly `null`, not absent and not an empty array:
+ *
+ *   { version, status_code: 40100, status_message: "You are not authorized…",
+ *     time: "0 sec.", cost: 0, tasks_count: 0, tasks_error: 0, tasks: null }
+ *
+ * `cost: 0` on that response also confirms a rejected request is not billed.
+ * Undeclared keys (version, time, cost, tasks_count, tasks_error) are ignored
+ * structurally; only what the parser reads is typed here.
+ */
 interface DfsEnvelope {
-  /** Envelope-level status. Present even when `tasks` is absent entirely. */
+  /** Envelope-level status. Present even when `tasks` is null or absent. */
   status_code?: number;
   status_message?: string;
+  /** NULL in practice on envelope-level failures — not merely absent. */
   tasks?: Array<{
     status_code?: number;
     status_message?: string;
     result?: Array<Record<string, unknown>> | null;
-  }>;
+  }> | null;
 }
 
 export class DataForSeoProvider implements KeywordDataProvider {
