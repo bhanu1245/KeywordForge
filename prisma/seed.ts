@@ -7,6 +7,7 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
@@ -21,14 +22,24 @@ async function main() {
     },
   });
 
+  // Dev credentials. Deliberately a throwaway password on a .test domain —
+  // this seed never runs against production data, and DEV_AUTO_LOGIN_EMAIL
+  // exists so local work does not need it at all.
+  const devEmail = "bhanu@primewebmedia.test";
+  const devPassword = "keywordforge-dev";
+  const passwordHash = await bcrypt.hash(devPassword, 12);
+
   await prisma.user.upsert({
-    where: { email: "bhanu@primewebmedia.test" },
-    update: {},
+    where: { email: devEmail },
+    // Re-seeding resets the password so a forgotten local password is never a
+    // blocker; it does not touch anything else about the user.
+    update: { passwordHash },
     create: {
       agencyId: agency.id,
-      email: "bhanu@primewebmedia.test",
+      email: devEmail,
       name: "Bhanu",
       role: "owner",
+      passwordHash,
     },
   });
 
@@ -84,6 +95,10 @@ async function main() {
   const projectCount = await prisma.project.count();
   console.log(
     `Seeded agency "${agency.name}" (${agency.id}) with ${clients.length} clients and ${projectCount} projects.`,
+  );
+  console.log(`Dev login: ${devEmail} / ${devPassword}`);
+  console.log(
+    "Or set DEV_AUTO_LOGIN_EMAIL in .env to skip the login form locally.",
   );
 }
 

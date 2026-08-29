@@ -115,6 +115,28 @@ This shapes the **mock provider only**. With a live provider the real API return
 
 ---
 
+## Authentication
+
+Email + password, with server-side sessions. No auth library.
+
+**Why hand-rolled rather than Auth.js or Lucia:** Auth.js's own docs steer you away from the credentials provider and its Prisma adapter brings `Account`/`Session`/`VerificationToken` models it owns — which fights the existing `User.agencyId` that drives all tenancy here. Lucia was discontinued in 2025 and now ships as a "write it yourself" guide. What remains is ~200 lines of composition over established primitives: **bcryptjs** for hashing and Node's `crypto.randomBytes` for tokens. Nothing cryptographic is invented.
+
+**Sessions are opaque, not signed.** The cookie holds 32 bytes of CSPRNG output; only its SHA-256 is stored. There is no signing key to leak or rotate, a tampered token simply hashes to a value no row holds, and sessions are genuinely revocable — logout deletes the row, so a copied cookie dies with it. A signed JWT cannot do that without inventing a denylist.
+
+**The session belongs to a User, never an Agency.** `resolveContext()` reads the agency off the user row reached through the session. The previous `kf_agency` cookie held a raw agency id and checked only that the agency existed — editing that cookie granted full access to any tenant. Nothing agency-related now comes from the client.
+
+| | |
+|---|---|
+| Hashing | bcryptjs, cost 12 (`BCRYPT_COST` lowers it for tests only; ignored in production) |
+| Session TTL | 30 days, `httpOnly` + `sameSite=lax`, `secure` in production |
+| Signup | Creates a **new agency**, signer-up is owner |
+| Joining an agency | Owner-issued one-time invite link, hashed, single-use, 7-day expiry |
+| Dev fast path | `DEV_AUTO_LOGIN_EMAIL` resolves a **named seeded user**; ignored when `NODE_ENV=production` |
+
+Two deliberate details: login returns the same message and roughly the same timing for "no such user" and "wrong password" (a dummy bcrypt comparison burns the time when no hash exists), and `passwordHash` is nullable so a future OAuth user can exist without one — treated as *cannot* authenticate, never as *no password required*.
+
+`middleware.ts` redirects signed-out visitors to `/login`, but it runs on the Edge runtime and only checks that a cookie is **present**. It is a UX guard, not the boundary — `resolveContext()` does the authoritative lookup, and API routes return 401 JSON rather than an HTML redirect.
+
 ## Design system
 
 Dark-first, because this is a tool people keep open all day beside Search Console. Tokens live in one `@theme` block in [`src/app/globals.css`](src/app/globals.css).

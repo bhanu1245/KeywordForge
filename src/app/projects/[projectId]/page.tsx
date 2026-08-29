@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { Workspace } from "@/components/Workspace";
 import { getProjectClusters } from "@/lib/clusters/service";
 import { getProjectKeywords } from "@/lib/keywords/service";
@@ -8,6 +8,7 @@ import {
   assertProjectAccess,
   resolveContext,
   TenantAccessError,
+  UnauthenticatedError,
 } from "@/lib/tenancy";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +23,17 @@ export default async function ProjectPage({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  const { agencyId } = await resolveContext();
+
+  // Resolved outside the try below: an unauthenticated caller must be sent to
+  // /login, not turned into a 404 by the TenantAccessError handler there.
+  let context;
+  try {
+    context = await resolveContext();
+  } catch (error) {
+    if (error instanceof UnauthenticatedError) redirect("/login");
+    throw error;
+  }
+  const { agencyId } = context;
 
   try {
     const project = await assertProjectAccess(agencyId, projectId);

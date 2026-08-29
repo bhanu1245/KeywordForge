@@ -3,7 +3,10 @@ import { Inter } from "next/font/google";
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { UserMenu } from "@/components/UserMenu";
 import { Pill } from "@/components/ui";
+import { getSessionUser } from "@/lib/auth/session";
+import { prisma } from "@/lib/db";
 import { getRawProvider } from "@/lib/providers";
 import "./globals.css";
 
@@ -24,12 +27,24 @@ export const metadata: Metadata = {
     "Keyword research and SEO intelligence for agencies — discovery, difficulty, intent, clustering and briefs.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   // Read once per render on the server so the badge reflects the provider that
   // actually resolved, not merely what the env var asked for.
   const provider = getRawProvider();
+
+  // Header identity. Null on the login/signup pages, which is why the layout
+  // renders a "Sign in" link rather than assuming a session exists.
+  const session = await getSessionUser();
+  const agencyName = session
+    ? (
+        await prisma.agency.findUnique({
+          where: { id: session.agencyId },
+          select: { name: true },
+        })
+      )?.name ?? "Agency"
+    : "";
 
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
@@ -83,9 +98,21 @@ export default function RootLayout({
                   </Pill>
                 </span>
               )}
-              <span className="hidden text-xs text-subtle sm:inline">
-                Prime Web Media
-              </span>
+              {session ? (
+                <UserMenu
+                  name={session.name}
+                  email={session.email}
+                  role={session.role}
+                  agencyName={agencyName}
+                />
+              ) : (
+                <Link
+                  href="/login"
+                  className="rounded-lg border border-line bg-surface px-2.5 py-1 text-xs text-muted transition-colors hover:border-line-strong hover:text-ink"
+                >
+                  Sign in
+                </Link>
+              )}
               <ThemeToggle />
             </div>
           </div>

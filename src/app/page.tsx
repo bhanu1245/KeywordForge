@@ -3,7 +3,8 @@ import { Icon } from "@/components/Icon";
 import { NewProjectForm } from "@/components/NewProjectForm";
 import { EmptyState, formatCompact, formatNumber } from "@/components/ui";
 import { prisma } from "@/lib/db";
-import { resolveContext } from "@/lib/tenancy";
+import { redirect } from "next/navigation";
+import { resolveContext, UnauthenticatedError } from "@/lib/tenancy";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,18 @@ export const dynamic = "force-dynamic";
  * polished white-label Agency Mode UI is a later phase.
  */
 export default async function HomePage() {
-  const { agencyId } = await resolveContext();
+  // Middleware only checks that a session cookie is PRESENT (it runs on the
+  // edge, without database access). A stale or forged cookie reaches here and
+  // is rejected by resolveContext, so the redirect is repeated at this layer
+  // — the authoritative one.
+  let context;
+  try {
+    context = await resolveContext();
+  } catch (error) {
+    if (error instanceof UnauthenticatedError) redirect("/login");
+    throw error;
+  }
+  const { agencyId } = context;
 
   const clients = await prisma.client.findMany({
     where: { agencyId },

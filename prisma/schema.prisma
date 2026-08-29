@@ -46,6 +46,7 @@ model Agency {
   clients  Client[]
   apiKeys  ApiKey[]
   jobs     Job[]
+  invites  Invite[]
   usage    ProviderCall[]
 
   @@map("agencies")
@@ -58,12 +59,74 @@ model User {
   name      String
   // "owner" | "member" — coarse for MVP, expand when Agency Mode lands.
   role      String   @default("member")
+  // bcrypt hash. NULLABLE on purpose: it lets a future OAuth/magic-link user
+  // exist without a password, and it keeps this column addable to the
+  // existing seeded rows without a destructive migration. Login treats null
+  // as "cannot authenticate with a password" — never as "no password
+  // required", which would be a bypass.
+  passwordHash String?
+  lastLoginAt  DateTime?
   createdAt DateTime @default(now())
 
-  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  sessions Session[]
+  invites  Invite[]
 
   @@index([agencyId])
   @@map("users")
+}
+
+// Server-side sessions.
+//
+// The cookie carries an OPAQUE random token; only its SHA-256 is stored here.
+// Two consequences that matter:
+//   - Nothing in the cookie is worth tampering with. A flipped byte simply
+//     hashes to a value no row has, so it is rejected by lookup rather than
+//     by signature checking.
+//   - A leaked database still does not yield usable cookies, and sessions are
+//     revocable (deleting the row logs the user out immediately), which a
+//     stateless signed JWT cannot do.
+//
+// The session belongs to a USER, never to an agency. resolveContext reads the
+// agency off the user, so a session can never claim an agency it is not a
+// member of — the previous kf_agency cookie was exactly that hole.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// One-time invite links (PRD §7 module 36 groundwork).
+//
+// Signup NEVER joins an existing agency on its own — that would let anyone
+// who guesses an agency id walk into another tenant's data. Joining requires
+// a token an existing owner generated, and the token is single-use and
+// expiring. Same storage rule as sessions: only the hash is kept.
+model Invite {
+  id          String    @id @default(cuid())
+  agencyId    String
+  tokenHash   String    @unique
+  email       String?
+  role        String    @default("member")
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdById String?
+  createdAt   DateTime  @default(now())
+
+  agency    Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([agencyId])
+  @@map("invites")
 }
 
 model Client {
