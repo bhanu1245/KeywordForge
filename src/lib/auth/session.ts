@@ -21,6 +21,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { prisma } from "../db";
+import { isLocalEnv } from "../env";
 import { SESSION_COOKIE } from "./cookie";
 
 export { SESSION_COOKIE };
@@ -94,7 +95,11 @@ export async function createSession(
   const store = await cookies();
   store.set(SESSION_COOKIE, token, {
     httpOnly: true, // never readable by JS — blocks XSS cookie theft
-    secure: process.env.NODE_ENV === "production", // plain http in local dev
+    // Secure by default. Dropped ONLY for a declared local environment, where
+    // there is no https to send it over. Phrased as "not local" rather than
+    // "is production" so an unset NODE_ENV keeps the cookie https-only rather
+    // than quietly allowing it over plain http.
+    secure: !isLocalEnv(),
     sameSite: "lax", // survives top-level navigation, blocks cross-site POST
     path: "/",
     expires: expiresAt,

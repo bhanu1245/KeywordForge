@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 // Import from the constants-only module, never from session.ts — that would
 // pull node:crypto and Prisma into the Edge runtime.
 import { SESSION_COOKIE } from "@/lib/auth/cookie";
+import { isLocalEnv } from "@/lib/env";
 
 /**
  * Redirects signed-out visitors to /login before a page renders.
@@ -21,8 +22,9 @@ export function middleware(request: NextRequest) {
   if (hasSession) return NextResponse.next();
 
   // The dev fast path bypasses login entirely, so the redirect must not fight
-  // it. Mirrors the guard in resolveContext.
-  if (process.env.NODE_ENV !== "production" && process.env.DEV_AUTO_LOGIN_EMAIL) {
+  // it. Same allow-list as resolveContext — these two must agree, and both
+  // must fail closed on an unrecognised NODE_ENV.
+  if (isLocalEnv() && process.env.DEV_AUTO_LOGIN_EMAIL) {
     return NextResponse.next();
   }
 

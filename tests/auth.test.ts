@@ -59,6 +59,8 @@ const { resolveContext, UnauthenticatedError, TenantAccessError } = await import
 const { signup, login, attemptLogin, createInvite, AuthError } = await import(
   "../src/lib/auth/accounts.ts"
 );
+const { isLocalEnv, isLocalEnvValue } = await import("../src/lib/env.ts");
+const { requestPasswordReset } = await import("../src/lib/auth/passwordReset.ts");
 const { readFileSync } = await import("node:fs");
 
 /**
@@ -424,19 +426,140 @@ describe("constant-time session comparison", () => {
   });
 });
 
+describe("environment gating (fail-closed)", () => {
+  it("isLocalEnvValue accepts only explicitly declared local environments", () => {
+    for (const good of ["development", "test"]) {
+      assert.equal(isLocalEnvValue(good), true, good);
+    }
+    // Unset, empty, mistyped, or anything else must be treated as production.
+    for (const bad of [undefined, null, "", "staging", "prod", "production", "Development", "dev", "TEST"]) {
+      assert.equal(isLocalEnvValue(bad), false, String(bad));
+    }
+  });
+
+  /**
+   * Regression guard for the footgun this test originally tripped over: a
+   * single function with `env = process.env.NODE_ENV` returns TRUE when handed
+   * an explicit `undefined`, because the default kicks in and reads the
+   * ambient environment.
+   */
+  it("isLocalEnvValue treats an explicit undefined as undefined, not as ambient", () => {
+    const original = process.env.NODE_ENV;
+    try {
+      (process.env as Record<string, string>).NODE_ENV = "development";
+      assert.equal(isLocalEnvValue(undefined), false);
+      // ...while the ambient reader does see it.
+      assert.equal(isLocalEnv(), true);
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = original ?? "test";
+    }
+  });
+
+  /**
+   * Regression guard. `devLink` is a working account-takeover token returned
+   * in the API response; gating it on `!== "production"` handed it to anyone
+   * who could name a registered email whenever NODE_ENV was unset or mistyped.
+   */
+  it("deliverResetLink gates on an allow-list, never on 'not production'", () => {
+    const source = codeOf("src/lib/auth/passwordReset.ts");
+    assert.match(source, /isLocalEnv\(\)/, "must gate on the explicit allow-list helper");
+    assert.ok(
+      !/NODE_ENV\s*!==\s*["']production["']/.test(source),
+      "regression: negated production check re-introduced",
+    );
+    assert.ok(
+      !/NODE_ENV/.test(source),
+      "should not read NODE_ENV directly — go through isLocalEnv()",
+    );
+  });
+
+  it("no security gate anywhere reads 'not production' directly", () => {
+    for (const file of [
+      "src/lib/auth/passwordReset.ts",
+      "src/lib/auth/session.ts",
+      "src/lib/auth/password.ts",
+      "src/lib/tenancy.ts",
+      "src/middleware.ts",
+    ]) {
+      assert.ok(
+        !/NODE_ENV\s*!==\s*["']production["']/.test(codeOf(file)),
+        `${file} uses the allow-by-default pattern`,
+      );
+    }
+  });
+
+  /** Behavioural: an unrecognised NODE_ENV must not leak the token. */
+  it("requestPasswordReset withholds devLink outside development/test", async () => {
+    const original = process.env.NODE_ENV;
+    try {
+      for (const env of ["staging", "", "production"]) {
+        (process.env as Record<string, string>).NODE_ENV = env;
+        const result = await requestPasswordReset("a@alpha.test", "https://app.test");
+        assert.equal(
+          result.devLink,
+          undefined,
+          `devLink leaked with NODE_ENV="${env}"`,
+        );
+        assert.equal(result.sent, false);
+      }
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = original ?? "test";
+    }
+  });
+
+  it("still returns devLink in a declared local environment", async () => {
+    const original = process.env.NODE_ENV;
+    try {
+      (process.env as Record<string, string>).NODE_ENV = "development";
+      const result = await requestPasswordReset("a@alpha.test", "https://app.test");
+      assert.ok(result.devLink, "development should still get the convenience link");
+      assert.match(result.devLink, /^https:\/\/app\.test\/reset\?token=/);
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = original ?? "test";
+    }
+  });
+
+  /** A token must never come back for an address with no account. */
+  it("never returns devLink for an unknown email, even locally", async () => {
+    const original = process.env.NODE_ENV;
+    try {
+      (process.env as Record<string, string>).NODE_ENV = "development";
+      const result = await requestPasswordReset("nobody@nowhere.test", "https://app.test");
+      assert.equal(result.devLink, undefined);
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = original ?? "test";
+    }
+  });
+
+  it("session cookies are secure unless the environment is declared local", () => {
+    const source = codeOf("src/lib/auth/session.ts");
+    assert.match(source, /secure:\s*!isLocalEnv\(\)/, "secure flag must fail closed");
+  });
+});
+
 describe("dev auto-login guard", () => {
   /** (a) unreachable in production even with the variable set. */
-  it("is refused when NODE_ENV is production", () => {
+  /**
+   * This branch signs a request in with no credentials, so it must fail
+   * closed: only a declared local environment may reach it. Previously gated
+   * on `=== "production"`, which let an unset NODE_ENV through — a silent
+   * full authentication bypass.
+   */
+  it("is refused unless the environment is explicitly local", () => {
     const source = codeOf("src/lib/tenancy.ts");
     assert.match(
       source,
-      /if \(process\.env\.NODE_ENV === "production"\) return null;/,
-      "devAutoLogin must bail out before reading DEV_AUTO_LOGIN_EMAIL in production",
+      /if \(!isLocalEnv\(\)\) return null;/,
+      "devAutoLogin must bail out via the allow-list before reading the env var",
     );
-    // The guard must come BEFORE the env var is read.
-    const guardAt = source.indexOf('NODE_ENV === "production"');
+    // The guard must still come BEFORE the env var is read.
+    const guardAt = source.indexOf("!isLocalEnv()");
     const readAt = source.indexOf("DEV_AUTO_LOGIN_EMAIL");
     assert.ok(guardAt !== -1 && readAt !== -1 && guardAt < readAt);
+  });
+
+  it("middleware uses the same allow-list, so the two cannot disagree", () => {
+    assert.match(codeOf("src/middleware.ts"), /isLocalEnv\(\)\s*&&\s*process\.env\.DEV_AUTO_LOGIN_EMAIL/);
   });
 
   /** (b) the shipped template must never carry a working value. */

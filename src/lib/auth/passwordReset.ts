@@ -17,6 +17,7 @@
  */
 
 import { prisma } from "../db";
+import { isLocalEnv } from "../env";
 import { AuthError } from "./accounts";
 import { hashPassword } from "./password";
 import { generateToken, hashToken, safeEqualHex } from "./session";
@@ -41,10 +42,20 @@ export interface ResetDelivery {
 async function deliverResetLink(email: string, link: string): Promise<ResetDelivery> {
   // if (process.env.EMAIL_PROVIDER_KEY) { await provider.send(...); return { sent: true }; }
 
-  if (process.env.NODE_ENV !== "production") {
+  /**
+   * EXPLICIT ALLOW-LIST, not `!== "production"`.
+   *
+   * `devLink` is a working account-takeover token handed straight back in the
+   * API response. Gating it on "not production" means an unset or mistyped
+   * NODE_ENV returns that token to anyone who can name a registered email —
+   * no mailbox access required. Only a declared local environment may see it;
+   * everything else, including unset, gets the silent path.
+   */
+  if (isLocalEnv()) {
     console.log(`[auth] password reset link for ${email}: ${link}`);
     return { sent: false, devLink: link };
   }
+
   console.warn(
     `[auth] password reset requested for ${email} but no email provider is configured — link not delivered.`,
   );

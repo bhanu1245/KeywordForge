@@ -21,6 +21,7 @@
  */
 
 import { prisma } from "./db";
+import { isLocalEnv } from "./env";
 import { getSessionUser, type SessionUser } from "./auth/session";
 
 export class TenantAccessError extends Error {
@@ -65,7 +66,10 @@ export interface TenantContext {
  * chose a tenant nobody had authenticated as.
  */
 async function devAutoLogin(): Promise<TenantContext | null> {
-  if (process.env.NODE_ENV === "production") return null;
+  // Allow-list, not `!== "production"`. This branch signs a request in with
+  // no credentials at all, so an unset or mistyped NODE_ENV taking it would
+  // be a silent full authentication bypass.
+  if (!isLocalEnv()) return null;
   const email = process.env.DEV_AUTO_LOGIN_EMAIL;
   if (!email) return null;
 
