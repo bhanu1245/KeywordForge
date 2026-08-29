@@ -3,6 +3,8 @@ import { fail, handleError, ok, parseBody, parseQuery } from "@/lib/api";
 import { enqueueJob } from "@/lib/jobs/runner";
 import { getCannibalisation, getRankHistory, getRankSummary } from "@/lib/rank/service";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
+import { estimateRankCheckCost } from "@/lib/providers/costs";
+import { assertWithinQuota } from "@/lib/quota/service";
 
 const getSchema = z.object({
   projectId: z.string().min(1),
@@ -63,11 +65,16 @@ export async function POST(request: Request) {
       );
     }
 
+    // Rank checks bypass the SERP cache by design, so every keyword is a
+    // fresh billable call — no cache relief to discount for.
+    const keywordCount = body.limit ?? 25;
+    await assertWithinQuota({ agencyId, estimate: estimateRankCheckCost(keywordCount) });
+
     const job = await enqueueJob({
       agencyId,
       projectId: project.id,
       type: "rank_check",
-      total: body.limit ?? 25,
+      total: keywordCount,
       params: {
         limit: body.limit ?? 25,
         language: project.language,

@@ -26,6 +26,11 @@ import type {
 export interface UsageContext {
   agencyId?: string | null;
   projectId?: string | null;
+  /**
+   * Set when the call arrived through the public API. Recorded on every
+   * ledger row so a key's spend can be summed independently of the agency's.
+   */
+  apiKeyId?: string | null;
 }
 
 function ttlDays(): number {
@@ -58,6 +63,7 @@ async function recordCall(
       data: {
         agencyId: ctx.agencyId ?? null,
         projectId: ctx.projectId ?? null,
+        apiKeyId: ctx.apiKeyId ?? null,
         provider,
         endpoint,
         units,

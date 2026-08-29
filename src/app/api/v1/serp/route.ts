@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db";
 import { enqueueJob } from "@/lib/jobs/runner";
 import { getSerpCoverage, getSerpForKeyword } from "@/lib/serp/service";
 import { assertProjectAccess, resolveContext, TenantAccessError } from "@/lib/tenancy";
+import { estimateSerpCost } from "@/lib/providers/costs";
+import { assertWithinQuota } from "@/lib/quota/service";
 
 const getSchema = z.object({
   projectId: z.string().min(1),
@@ -55,11 +57,16 @@ export async function POST(request: Request) {
     const body = await parseBody(request, postSchema);
     const project = await assertProjectAccess(agencyId, body.projectId);
 
+    // One metered call per keyword. The panel already showed this count as a
+    // warning; the quota check turns that advisory into enforcement.
+    const keywordCount = body.keywordIds?.length ?? body.limit ?? 25;
+    await assertWithinQuota({ agencyId, estimate: estimateSerpCost(keywordCount) });
+
     const job = await enqueueJob({
       agencyId,
       projectId: project.id,
       type: "serp_analyze",
-      total: body.keywordIds?.length ?? body.limit ?? 25,
+      total: keywordCount,
       params: {
         keywordIds: body.keywordIds,
         limit: body.limit ?? 25,

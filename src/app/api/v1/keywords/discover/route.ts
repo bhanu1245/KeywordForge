@@ -3,6 +3,8 @@ import { fail, handleError, ok, parseBody } from "@/lib/api";
 import { discoverKeywords, getProjectKeywords } from "@/lib/keywords/service";
 import { normalizeText } from "@/lib/seo/normalize";
 import { CHANNELS } from "@/lib/providers/types";
+import { estimateDiscoverCost } from "@/lib/providers/costs";
+import { assertWithinQuota } from "@/lib/quota/service";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
 import { enqueueJob } from "@/lib/jobs/runner";
 
@@ -36,6 +38,10 @@ export async function POST(request: Request) {
         422,
       );
     }
+
+    // A single keyword_ideas call, but still metered — an agency already over
+    // its cap must not be able to keep spending one call at a time.
+    await assertWithinQuota({ agencyId, estimate: estimateDiscoverCost() });
 
     const limit = body.limit ?? 200;
     const channel = body.channel ?? "google";

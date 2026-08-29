@@ -2,6 +2,8 @@ import { z } from "zod";
 import { handleError, ok, parseBody } from "@/lib/api";
 import { enqueueJob } from "@/lib/jobs/runner";
 import { assertProjectAccess, resolveContext } from "@/lib/tenancy";
+import { estimateBulkEnrichCost } from "@/lib/providers/costs";
+import { assertWithinQuota } from "@/lib/quota/service";
 
 /**
  * Hard ceiling per request. PRD §12 targets 1M keywords; that scale arrives by
@@ -30,6 +32,16 @@ export async function POST(request: Request) {
     if (keywords.length === 0) {
       return ok({ error: "No usable keywords in the upload" }, 422);
     }
+
+    /**
+     * Quota gate BEFORE the job is queued, so a refusal costs nothing.
+     *
+     * Checking here rather than inside the job handler matters: enqueueing
+     * first would return 202, show a progress bar, and only then fail — after
+     * the first batch had already been paid for.
+     */
+    const estimate = estimateBulkEnrichCost(keywords.length);
+    await assertWithinQuota({ agencyId, estimate });
 
     const job = await enqueueJob({
       agencyId,

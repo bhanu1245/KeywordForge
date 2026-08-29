@@ -12,6 +12,12 @@
  */
 
 import { normalizeText } from "../seo/normalize";
+import {
+  COST_PER_IDEAS_CALL,
+  COST_PER_SERP_CALL,
+  COST_PER_VOLUME_CALL,
+  reconcileCost,
+} from "./costs";
 import type {
   KeywordDataProvider,
   KeywordIdeasInput,
@@ -30,26 +36,8 @@ import type {
  */
 const DFS_ERROR_THRESHOLD = 40000;
 
-/**
- * Costs OBSERVED on live calls, not guessed.
- *
- *   keyword_ideas (limit 5)      cost 0.0126
- *   search_volume (2 keywords)   cost 0.0900
- *
- * The search_volume figure is the important correction: it was modelled as
- * $0.00005 PER KEYWORD, which for that 2-keyword call predicted $0.0001
- * against an actual $0.09 — understating spend by ~900x. Google Ads volume is
- * billed per TASK, not per keyword, so the ledger was wildly optimistic.
- *
- * CAVEAT: each figure is a single observation. keyword_ideas may scale with
- * `limit`, and search_volume may have a per-keyword component above some
- * batch size — one 2-keyword call cannot distinguish a flat fee from a small
- * per-keyword one. Treat these as order-of-magnitude, and re-measure against
- * your own plan before quoting margins.
- */
-const COST_PER_IDEAS_CALL = 0.0126;
-const COST_PER_VOLUME_CALL = 0.09;
-const COST_PER_SERP_CALL = 0.002;
+// Cost constants live in ./costs so the quota estimator and this client are
+// guaranteed to agree about what an operation costs.
 
 /**
  * Envelope shape, confirmed against a real response.
@@ -68,6 +56,8 @@ interface DfsEnvelope {
   /** Envelope-level status. Present even when `tasks` is null or absent. */
   status_code?: number;
   status_message?: string;
+  /** What DataForSEO actually charged for this request, in USD. */
+  cost?: number;
   /** NULL in practice on envelope-level failures — not merely absent. */
   tasks?: Array<{
     status_code?: number;
@@ -260,7 +250,13 @@ export class DataForSeoProvider implements KeywordDataProvider {
       .map((i) => DataForSeoProvider.toRawKeyword(i))
       .filter((k): k is RawKeyword => k !== null && k.text.length > 0);
 
-    return { data, unitsConsumed: 1, costUsd: COST_PER_IDEAS_CALL };
+    // ACTUAL cost from the response, not the estimate constant — the ledger
+    // must record what was really charged.
+    return {
+      data,
+      unitsConsumed: 1,
+      costUsd: reconcileCost("keyword_ideas", json.cost, COST_PER_IDEAS_CALL),
+    };
   }
 
   async searchVolume(
@@ -288,7 +284,7 @@ export class DataForSeoProvider implements KeywordDataProvider {
       // Billed per task, not per keyword — see the note on COST_PER_VOLUME_CALL.
       // `unitsConsumed` still counts keywords, since that is what the ledger
       // reports as work done; only the money is per call.
-      costUsd: COST_PER_VOLUME_CALL,
+      costUsd: reconcileCost("search_volume", json.cost, COST_PER_VOLUME_CALL),
     };
   }
 
@@ -342,7 +338,7 @@ export class DataForSeoProvider implements KeywordDataProvider {
         features: [...features],
       },
       unitsConsumed: 1,
-      costUsd: COST_PER_SERP_CALL,
+      costUsd: reconcileCost("serp", json.cost, COST_PER_SERP_CALL),
     };
   }
 }

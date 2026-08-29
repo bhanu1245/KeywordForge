@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { ZodError, type ZodType } from "zod";
 import { TenantAccessError } from "./tenancy";
+import { QuotaExceededError } from "./quota/service";
 
 export function ok<T>(data: T, status = 200) {
   return NextResponse.json(data, { status });
@@ -25,6 +26,18 @@ export function fail(message: string, status = 400, details?: unknown) {
  * another agency's id exists.
  */
 export function handleError(error: unknown) {
+  // Quota refusals carry their own status (402) and a message that already
+  // states usage, cap and what the operation would have cost.
+  if (error instanceof QuotaExceededError) {
+    return fail(error.message, error.status, {
+      pool: error.pool,
+      estimate: error.estimate,
+      used: error.quota.used,
+      limit: error.quota.limit,
+      remaining: error.quota.remaining,
+      resetsAt: error.quota.windowEnd,
+    });
+  }
   if (error instanceof TenantAccessError) {
     return fail(error.message, error.status);
   }

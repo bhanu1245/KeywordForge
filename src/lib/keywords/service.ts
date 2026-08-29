@@ -8,6 +8,7 @@
 
 import { prisma } from "../db";
 import { getProvider } from "../providers";
+import { VOLUME_KEYWORDS_PER_CALL } from "../providers/costs";
 import type { Channel, RawKeyword } from "../providers/types";
 import { classifyIntent, type Intent } from "../seo/intent";
 import type { KeywordFilters, KeywordRow, ProjectAssumptions } from "../types";
@@ -232,9 +233,9 @@ export async function enrichKeywordList(input: {
     linkedToProject: 0,
   };
 
-  // Providers cap batch size on volume lookups; 400 keeps us well inside
-  // every provider's limit and gives the progress bar something to move.
-  for (const batch of chunk(cleaned, 400)) {
+  // Batch size comes from lib/providers/costs so the quota estimate and the
+  // actual number of billable tasks can never disagree.
+  for (const batch of chunk(cleaned, VOLUME_KEYWORDS_PER_CALL)) {
     const metrics = await provider.searchVolume({
       keywords: batch,
       language: input.language,

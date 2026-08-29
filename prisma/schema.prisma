@@ -39,6 +39,17 @@ model Agency {
   // White-label branding, deferred to Phase 4 UI but stored from day one so
   // report generation never needs a migration. JSON: { logoUrl, primaryColor }
   branding  String?
+
+  /**
+   * INTERNAL SAFETY CAP on metered provider spend, USD per calendar month.
+   *
+   * THIS IS NOT PRICING. It is a circuit breaker so a runaway import or a
+   * loop cannot drain the DataForSEO balance, and it must never be shown to
+   * a customer, used as a plan allowance, or treated as a billing figure.
+   * Customer-facing pricing is an unmade decision (PRD §15).
+   */
+  monthlyQuotaUsd Float @default(20)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -405,6 +416,12 @@ model ProviderCall {
   id        String   @id @default(cuid())
   agencyId  String?
   projectId String?
+  /**
+   * Set when the call arrived through the public API, so a key's spend can be
+   * measured independently of the agency's dashboard usage. NULL means the
+   * call came from the app itself.
+   */
+  apiKeyId  String?
   provider  String
   endpoint  String
   // How many keyword/SERP units this call consumed.
@@ -415,9 +432,12 @@ model ProviderCall {
 
   agency  Agency?  @relation(fields: [agencyId], references: [id], onDelete: SetNull)
   project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  apiKey  ApiKey?  @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
 
   @@index([agencyId, createdAt])
   @@index([projectId, createdAt])
+  // Drives the per-key quota window query.
+  @@index([apiKeyId, createdAt])
   @@map("provider_calls")
 }
 
@@ -583,11 +603,25 @@ model ApiKey {
   prefix     String
   scopes     String    @default("read")
   rateLimit  Int       @default(60)
+
+  /**
+   * This key's OWN monthly spend cap, independent of the agency's pool.
+   *
+   * A key can be capped tighter than the agency overall — e.g. a key handed
+   * to a client integration gets $5 while the agency has $20. NULL means the
+   * key has no cap of its own and is bounded only by the agency's.
+   *
+   * Same disclaimer as Agency.monthlyQuotaUsd: an internal safety cap, never
+   * a customer-facing allowance.
+   */
+  monthlyQuotaUsd Float?
+
   lastUsedAt DateTime?
   revokedAt  DateTime?
   createdAt  DateTime  @default(now())
 
-  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  agency Agency         @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  usage  ProviderCall[]
 
   @@index([agencyId])
   @@map("api_keys")
